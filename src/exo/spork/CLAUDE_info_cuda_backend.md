@@ -8,5 +8,6 @@ The main conversions are:
 * Removing distributed dimensions, so the code becomes more like a CUDA program that "programs a single thread"
 * Converting the single device task into per-warp-specialization code paths, with unused variables eliminated and `setmaxnreg` injected.
 
-The human is strongly consider converting this from a `LoopIR → LoopIR` rewrite into a `LoopIR → CudaThreadIR` rewrite,
+The human is weakly considering converting this from a `LoopIR → LoopIR` rewrite into a `LoopIR → CudaThreadIR` rewrite,
 where `CudaThreadIR` is a placeholder name for an IR for doing code manipulations from a more CUDA-like perspective of a program for a single thread.
+However, this has serious costs in terms of making it difficult to re-use existing `LoopIR` tools like `IndexRangeEnvironment`.
