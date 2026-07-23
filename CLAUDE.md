@@ -25,27 +25,37 @@ CIR with PtxCodegen node?
 Category 1 Campaign:
     * Sm90_SmemSwizzle window encoder, with both swizzled and unswizzled 32-bit pointer; hope for dead value elimination.
 
-    * Remove "codegen_sync_stmt" hack and replace with explicit LoopIR lowering.
+    * Add magic Syms for threadIdx.x, blockIdx.x; replace CollIndexExpr.c_codegen with callback that takes CIR_Wrapper or anything that has operators overloaded.
+
+    * Remove "codegen_sync_stmt" hack and replace with explicit LoopIR lowering + codegen instrs.
       Only mbarrier makes this hard: launder mbarrier into f64 array that the CudaDeviceSetupBuilder magically initializes.
       mbarrier parity needs to somehow be computed.
-      -> simplify() does nothing for this.
-      -> IndexRangeEnvironment handles branching later.
-      -> solitary barrier testing moves here.
+      -> solitary barrier testing moves here; LoweredBarrierType can go away.
+      This is before any ManagedRingBufferIdx replacement.
 
-    * inline_codegen for ldmatrix and TMA ... replace with another LoopIR nest, with barrier laundered as f64 and parity given to you magically.
+    * inline_codegen for ldmatrix and TMA ... replace with another LoopIR nest, with barrier laundered as f64 and phase given to you magically.
+      -> Use some placeholder memory type CodegenMbarrierSmem(arrive_count).
+      -> After BarrierUsageAnalysis and before CollAnalysis; no ManagedRingBufferIdx yet
+      [!] makes distributed_coll_units unused for macro'd instructions
+      -> Payoff is it makes the internal pointer adjustment inside "transparent" to LoopIR analysis
 
     * Look for Read exprs corresponding to memories with a window encoder. For each:
         * Lift into WindowStmt + 0 indexed.
         * Check for any other WindowStmt in scope that "easily" converts to this one.
-          Easily means it's a constant offset that meets the swizzle_period requirement.
+          Easily means it's a constant offset that meets the swizzle_period requirement. [Maybe ignore this actually; rely on loop unroll?]
           If so, replace the rhs of this WindowStmt with the WindowStmt found.
-        * Otherwise, differentiate etc.
-        * WindowStmt adjust mode.
+        * Otherwise, differentiate etc. MUST HAPPEN AFTER managed ring buffer rewrite.
+          -> hoist outside seq loop:
+          -> hoist outside cuda_threads loop: replace iter with codegen somehow [CIR?]
+          -> don't hoist out of if/else or cuda_tasks loop
+        * WindowStmt adjust mode. Minimum support needed for Sm90_SmemSwizzled, mbarrier, Fallback encoder
 
     * Do cuda_backend rewrites as before
 
     * Eliminate branches from range analysis? Need to teach IndexRangeEnvironment about ManagedRingBufferIdx: [0, ring_depth - 1] and eliminate branches.
       Actually need to audit the goldens carefully for this step.
+
+      exo_SyncState basically becomes ring buffer consumption variable container.
 
 Testing:
     * explicit_gridDim, check task id is as expected.
