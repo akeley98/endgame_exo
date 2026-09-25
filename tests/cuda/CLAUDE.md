@@ -233,3 +233,10 @@ Common mistakes when writing CUDA error tests:
    for w in cuda_threads(0, 4, unit=cuda_warp):
        data[w, t, i] = 1.0
    ```
+
+### Multi-CTA mbarrier tests and `$EXO_STRICT_CLUSTER_MBARRIER`
+
+Codegen for mbarriers receiving arrives from other CTAs depends on `$EXO_STRICT_CLUSTER_MBARRIER` (see `plan_mbarrier_codegen.md`).
+Golden/excut tests of such mbarriers must pin it with `monkeypatch.setenv("EXO_STRICT_CLUSTER_MBARRIER", "0" or "1")`,
+otherwise the result depends on the user's environment (and undefined emits a `UserWarning`).
+`mkref_mbarriers(..., strict_cluster=True)` generates the matching strict excut reference.
