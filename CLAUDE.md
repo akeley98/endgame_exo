@@ -134,6 +134,7 @@ Together this is why all the proposed pointer or window manipulation is done
   Would be nice to statically eliminate this when possible, which will entail interaction between multiple levels of compiler features (e.g. range query).
   This branch is not free at runtime; due to the low occupancy of tensor kernels, the SM easily stalls waiting for the branch to resolve, as speculation is not a thing in GPUs.
   Example of when this would be useful is when the first `pipeline_depth`-many iterations of the producer warp are unrolled, so the remaining iterations have the branch around the `Await`-for-consumers eliminated.
+  Research (2026-09-25): nvcc won't eliminate the branch even with the loop cut and `__builtin_assume` hints, so the analysis must be done in the Exo compiler; see [plan_mbarrier_prearrive_branch.md](plan_mbarrier_prearrive_branch.md).
 
 
 # Category 2. Sequential-Parallel Equivalence Ties Your Hands
