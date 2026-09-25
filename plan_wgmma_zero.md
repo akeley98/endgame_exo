@@ -141,7 +141,7 @@ What works is to keep the source spec unchanged (`D_rmem = 0; for k: D_rmem += .
 * The prologue fission (`fission(gap_before_main)`) and the whole "Finalize zero prologue" block go away; the zero rides along through `lift_alloc` / `lift_scope` / `expand_dim` / `stage_mem`.
 * Resulting pre-replace shape under the `ms` loop is `for mw: for mi: for sub_cta_n: (if iter_k == 0: D = 0); for sub_iter_k: D += ...`, which unifies with `_zi` and yields `zero_init = (iter_k == 0)`.
 * `sched_cut_sync_iter_k` still cuts the loop *after* `replace`, so both halves carry the arg `iter_k == 0`. That's harmless (see Codegen).
-* **Caveat:** the prototype survives `unsafe_remove_if(gemm, wgmma_ms_cursor, True)` only because of a bug.
+* **Caveat (bug since fixed in `exo`, 2026-09-25; the prototype now needs explicit guard removal):** the prototype survives `unsafe_remove_if(gemm, wgmma_ms_cursor, True)` only because of a bug.
   Recursive `DoUnsafeRemoveIf` only keeps edits from the last child of each body (`rewrite/LoopIR_scheduling.py:2386`), so it strips the K tail guard (the last child) but misses `if iter_k == 0` (the first child).
   A proper implementation should remove the M/N/K guards explicitly, or fix the bug and make removal selective.
   If the bug is fixed naively, `replace` fails loudly (an `Assign` doesn't unify with an `If`), so nothing goes silently wrong.
