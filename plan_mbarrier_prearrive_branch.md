@@ -3,6 +3,7 @@
 Status: research only (2026-09-25).
 Justification for the approach in `CLAUDE.md`, "`mbarrier` Branch Elimination": do the analysis in the Exo compiler, because nvcc won't do it.
 Related: [plan_mbarrier_codegen.md](plan_mbarrier_codegen.md).
+Implementation path: [plan_seq_unroll_head.md](plan_seq_unroll_head.md) (producer loop starting at `ring_depth`) and [plan_static_bool_folding.md](plan_static_bool_folding.md) §4.
 
 ## Does cutting the producer loop remove the branch?
 
