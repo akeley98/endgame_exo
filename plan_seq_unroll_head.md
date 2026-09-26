@@ -89,3 +89,12 @@ because the real deeper purpose of this is to prepare for the
 `cuda_multi_for` change, and that's predicated on the
 post-unroll-head-transformed code *failing* sync-check (due to "no
 forward progress" or related issues).
+
+## More Human Addition
+
+Actually I wonder if the whole LoopIR→LoopIR rewrite can be done "just
+in time" in the compile-Seq-loop code. This will completely bypass the
+ordering problems with the hypothetical `cuda_multi_for` loop.  Also,
+there's a serious foot-gun in the proposal where `sync_check.py` takes
+as input a LoopIR nest and a `CollAnalysis` *that is generated from a
+LoopIR nest considerably structurally different*.
