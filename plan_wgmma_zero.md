@@ -137,6 +137,9 @@ Landed as designed. Deviations and details:
 * `schedule_gemm`: the selective guard removal is `remove_tail_guards_keep_zero(p, cursor)` in `tk_gemm_util.py`.
   `gap_before_main` is gone along with the prologue fission.
 * `test_misc_cuda_err.py::mkproc_packed_dims_point_expr_err` now uses `cuda_tk_tile_zero` on the `mi` loop (warp instr; needs a `simplify` after `replace` to drop `mw + 0`).
+* New `tests/cuda/test_Sm90a_wgmma_accum.py` (after landing): accumulate-only wgmma on D preloaded from GMEM, for all 6 A/B modes (8 dtype variants), golden (+ nvcc `sm_90a`) and Sm90a runtime vs. numpy.
+  Loads, stores, and the wgmma are `replace`d from plain loop nests.
+  H100 (human, 2026-09-25): all 8 runtime variants pass (`exo` `99b0ebda`).
 * New `tests/cuda/test_wgmma_zero_init_sync.py`: the hole table (wgmma fence pass; `cuda_in_order` fence and no fence both WAW) and the handwritten `hdim64 == 0` loop (sync-check + compile).
 * `timelines.generate_latex_table` had a hardcoded `wg0` column header; fixed.
   Its output is split by hand: the key lines go to `spork_b/QualTL.tex`, the tabular to `spork_b/gSyncTL.tex` (both regenerated).
