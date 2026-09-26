@@ -84,9 +84,7 @@ Sanity checks to add (Python, at sync-tl definition and instr registration; cams
   * `wgmma_fence_2` becomes `{wgmma_rmem_fenced_qual}` (drops `wgA`, `wgD`).
   * NOT in the wait-group L2: the commit-group Await's L2 is the shared `cuda_generic_and_async_proxy`, also used by TMA commit groups and garden-variety `Fence`; adding it there would let `Fence(cuda_in_order, cuda_generic_and_async_proxy)` stand in for a missing `wgmma.fence`.
   * Must be added to `Sm90_TkRmemTileA/D` `qual_tl_dict` so it lands in their masks.
-* `wgmma_zero_qual`: keeps its current role if it still exists (IOU for `scale-d = 0` materialized by the next real wgmma).
-  With temporal sync-tls gone it can no longer be granted as "temporal-only" by `cuda_in_order`;
-  instead add `cuda_in_order_rmem_qual` to `wgmma_zero`'s precondition set. See [plan_wgmma_zero.md](plan_wgmma_zero.md) for the pre-existing hole.
+* `wgmma_zero_qual`: deleted by [plan_wgmma_zero.md](plan_wgmma_zero.md) (2026-09-25); nothing to do here.
 
 Traced cases (all behave as intended):
 

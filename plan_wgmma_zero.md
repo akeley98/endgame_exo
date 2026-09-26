@@ -1,6 +1,6 @@
 # Plan: Zero-Init wgmma Instrs (remove `wgmma_zero`)
 
-Status: design agreed 2026-09-25, not started.
+Status: implemented 2026-09-25 (`exo` `aad79e3a`; see "Implementation notes" at the end).
 
 Depends on: nothing.
 Enables: [plan_static_bool_folding.md](plan_static_bool_folding.md) (the deferred "non-constant scale-d" warning).
@@ -128,3 +128,27 @@ ptxas does **not** peel iteration 0 on its own.
 A runtime `zero_init` (or `if k == 0: ...`) in an unpeeled loop gets C7515 "wgmma serialized" (toy experiments in the research record).
 Today `cut_loop` provides the peel; long term, [plan_seq_unroll_head.md](plan_seq_unroll_head.md) does.
 The deferred warning in [plan_static_bool_folding.md](plan_static_bool_folding.md) exists to catch forgetting it.
+
+## Implementation notes (2026-09-25)
+
+Landed as designed. Deviations and details:
+
+* `gen_Sm90_tk_mma.py` stamps out the accumulate-only family (variants 1-6, unchanged names) then the `_zi` family (7-12); `make_basic_mma(a_mode, b_mode, zero_init_form)`.
+* `schedule_gemm`: the selective guard removal is `remove_tail_guards_keep_zero(p, cursor)` in `tk_gemm_util.py`.
+  `gap_before_main` is gone along with the prologue fission.
+* `test_misc_cuda_err.py::mkproc_packed_dims_point_expr_err` now uses `cuda_tk_tile_zero` on the `mi` loop (warp instr; needs a `simplify` after `replace` to drop `mw + 0`).
+* New `tests/cuda/test_wgmma_zero_init_sync.py`: the hole table (wgmma fence pass; `cuda_in_order` fence and no fence both WAW) and the handwritten `hdim64 == 0` loop (sync-check + compile).
+* `timelines.generate_latex_table` had a hardcoded `wg0` column header; fixed.
+  Its output is split by hand: the key lines go to `spork_b/QualTL.tex`, the tabular to `spork_b/gSyncTL.tex` (both regenerated).
+* Goldens regenerated: `test_Sm90a_gemm/*` (tile type, no zero prologue, runtime scale-d only on k-step 0) and `test_3cycle_mbarrier/*` (only `wgmma_zero_qual` lines removed from sync-error dumps).
+* `sporkbench/examples/Sm90a_tk_fa` edited (human approved): zero + mma → `Sm90_tk_mma_row_col_zi(..., hdim64 == 0, ...)`.
+
+Validation on this (sm_80) machine:
+
+* `exocc` succeeds (including built-in `sync_check`) for all 36 `Sm90a_*` + `unflash_attn` sporkbench examples.
+* nvcc `sm_90a` (sporkbench's flags, `-Xptxas -v`): all 36 compile.
+  The only C75xx is the pre-existing C7513 on `..._m1n2_m256n192_coop_splitK_Armem` (A-in-rmem).
+* `Sm90a_tk_fa` SASS: the QK^T accumulation starts with one `RZ, !UPT` HGMMA; the other HGMMAs accumulate (nvcc folded `hdim64 == 0` after unrolling).
+* SASS spot check (`m1n2_coop_os_Sffff`, `m1n2_coop_os_Hbbff`): each accumulation's first HGMMA is `RZ, !UPT`, all later ones accumulate; 168 registers, no spills.
+
+H100 (human, 2026-09-25): `Sm90a_tk_fa`, `Sm90a_row_major_gemm`, and the Sm90a runtime tests pass with the new code.
