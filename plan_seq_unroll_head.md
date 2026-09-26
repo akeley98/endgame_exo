@@ -39,9 +39,13 @@ Only `Seq` loops get the option; `cuda_tasks`, `cuda_threads` and `par` loops do
   So barrier usage analysis, distributed-memory deduction, `cuda_backend` lowering, and ring-buffer consumption lowering should already handle it.
   Verify this rather than assume it.
 * sync-check (`Procedure.sync_check`, camspork) runs on the un-peeled proc and treats `unroll_head` as a no-op annotation, since the pass is semantics-preserving.
-  Open: whether to also sync-check the peeled form in tests as a cross-check.
-* The annotation has to survive scheduling ops that copy or rebuild loop modes (`set_loop_mode`, `update_loop_mode`, `divide_loop`, `cut_loop`, `fuse`, …).
+* Claude: The annotation has to survive scheduling ops that copy or rebuild loop modes (`set_loop_mode`, `update_loop_mode`, `divide_loop`, `cut_loop`, `fuse`, …).
   Decide per op whether it keeps, drops or rejects it; the default could be to drop it on any op that changes the loop bounds.
+  David Zhao Akeley: for `set_loop_mode` the wholesale replacement of the loop mode is intended.
+  `update_loop_mode` should preserve the annotation via `LoopMode.update`.
+  The other functions probably preserve the annotation as well by default
+  due to the ADT `update` function ... I'm not too concerned about this behavior,
+  since setting the loop mode tends to be a scheduling "finishing touch" anyway.
 
 ## Iteration-specific sync without `cut_loop`
 
@@ -76,3 +80,12 @@ Options, not decided:
 * Runtime (sm_80 box): a CPU/`Sm80` proc with `unroll_head` gives identical results for trip counts `< u`, `== u` and `> u`, including 0.
 * The excut line-number idea from the `seq` Unrolling section of [CLAUDE.md](CLAUDE.md) can confirm which copy executed.
 * Sm90 gemm (compile-only here): replacing `cut_loop` in `sched_cut_sync_iter_k` with `add_if` + `unroll_head=1` still passes sync-check, and `-Xptxas -v` shows no C7515.
+
+## Rejected sync-check test (Human Addition)
+
+A previous agent wrote "Open: whether to also sync-check the peeled
+form in tests as a cross-check.".  I think this is not feasible
+because the real deeper purpose of this is to prepare for the
+`cuda_multi_for` change, and that's predicated on the
+post-unroll-head-transformed code *failing* sync-check (due to "no
+forward progress" or related issues).
