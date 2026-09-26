@@ -39,9 +39,11 @@ Then delete the zero instr, the QualTL, and the tile-struct flag.
 2. **Accumulate-only form** (hardwired `scale-d = 1`; no `if` in `behavior`), so code that never zero-inits can `replace` without a dummy `if False:` in the pre-substitution code.
    Its `behavior` is identical to today's `Sm90_tk_mma_*`.
 
-Naming (open; recommendation): the accumulate-only form keeps today's `Sm90_tk_mma_{a}_{b}` names.
+Naming: the accumulate-only form keeps today's `Sm90_tk_mma_{a}_{b}` names.
 Its behavior doesn't change, so existing callers that never used the zero instr are unaffected.
 The zero-init form gets a suffix, e.g. `Sm90_tk_mma_{a}_{b}_zi`.
+
+David Zhao Akeley: `_zi` naming is approved.
 
 Keep **one top-level statement** in every `behavior` (the zero stays nested inside the `n` loop).
 `DoReplace` swaps `len(behavior.body)` statements for one call, so a two-statement behavior would need 2-statement block cursors.
