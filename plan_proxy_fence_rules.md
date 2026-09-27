@@ -50,6 +50,9 @@ This subsumes existing special cases in `cuda_sync_state.py`:
 
 Why this is consistent: a VisRecord can only gain an async-RAM QualTL via augment by an L2 containing one. That happens either (a) after a sync whose L1 contains generic RAM (fence emitted), or (b) after witnessing via an async-only L1, which only carries records that already went through (a) or a completion (implicit fence). So "async-only L1 → L2 with `cuda_in_order_ram_qual`, no fence" never skips a needed fence.
 
+David Zhao Akeley: `cuda_mbarrier_qual` being neither generic nor async proxy (from Exo's point of view), and being outside the QualTL mask of data RAM, is critical here.
+This prevents unintended transitivity silently carrying a generic QualTL -> async QualTL without an underlying codegen'd proxy fence.
+
 ## Traced patterns
 
 | Pattern | Sync | Fence |
