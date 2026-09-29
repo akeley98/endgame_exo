@@ -41,6 +41,7 @@ The implementation class must be delivered to camspork (SyncEnv) at construction
   * May appear in L1 (first sync-tl), which is its purpose (being witnessed).
   * Only VisRecords created by these are eligible for the non-convergent out-of-order optimization (`gOooOpt.tex`; `syncv_table.cpp` near the `access.is_ooo || granularity == 1` require).
   * `AccessInfo.out_of_order` (`core/instr_info.py`, defaulted in `core/instr_class.py:553`) should become derived from, or asserted equal to, "initial QualTL is out-of-order class".
+    David Zhao Akeley: actually `out_of_order` should just be removed entirely since its purpose was tied to `VF_issue` vs `VF_*`; advise if I missed a subtlety.
   * Members: `Sm80_cp_async_qual`, `tma_to_smem_async_qual`, `tma_to_gmem_async_qual`, `wgmma_async_smem_qual`, `tcgen05_smem_qual`, `wgmma_async_rmem_a_qual`.
 * **atomic**: two new QualTLs, one for generic-proxy atomics (e.g. `red.global` via `Sm80.py` atomic instrs), one for TMA reduce (async proxy).
   Research ([plan_sync_semantics_research.md](plan_sync_semantics_research.md)) says mixing generic and async-proxy atomics is a data race, so these must be separate.
@@ -102,37 +103,47 @@ TMEM QualTLs (`cuda_tmem_qual_tl_dict`, "somewhat broken" by its own comment) us
 
 ## Code touched
 
-Python:
+Pure Python:
 
-* `spork/timelines.py`: `Qual_tl` class attributes; new QualTLs; `Sync_tl` single set; drop `_cuda_temporal_quals` (with proxy-fence plan); `generate_latex_table`.
-* `core/memory.py`: `qual_tl_dict` interpretation (`q[0]` initial, precondition set derived), `make_qual_tl_mask`.
-* `core/instr_info.py`, `core/instr_class.py`: `AtomicityInfo`, `out_of_order` derivation/check.
+* `spork/timelines.py`: `Qual_tl` class attributes; new QualTLs; `Sync_tl` single set; drop `_cuda_temporal_quals` (with proxy-fence plan); `generate_latex_table` (add new QualTLs/SyncTL; ignore tcgen05 still; drop `full`/`temp` distinction).
+* `core/memory.py`: `InstrQuals` (David Zhao Akeley: review `f0df2875a650582ddbd034b271037035a94a2210` for human error and discuss differences between impl and the plan. I will decide whether to change the implementation or the plan. Pause if needed).
+* `core/instr_info.py`, `core/instr_class.py`: remove `out_of_order` and delete manipulation of it everywhere (David Zhao Akeley: I added this task with my slow human eyeballs so no list of files to touch; sorry).
 * `platforms/Sm80.py` (atomics), `platforms/Sm90/Sm90_tma_impl.py` (TMA reduce), `platforms/Sm90/Sm90_tk_mma_impl.py` (tile dicts).
-* `spork/sync_check.py`: pass single precondition mask, atomic QualTL; drop temporal bits.
-* `spork/camspork/camspork.py`: builder API.
+* `spork/sync_check.py`: pass single precondition mask, atomic QualTL; drop temporal bits. Stop passing write-only flag. SHIM: before camspork changes, pass the same mask to `L2_full` and `L2_temporal`.
+* rename "extended timeline set" to "precondition timeline set" everywhere.
+* Add brief comments only in `spork_b`, starting with `% no-VF:`, for outdated stuff for human to fix.
+* EXCEPTION: please actually fix the doc to gracefully input the new `generate_latex_table` table.
+  This is not automated; you have to manually put the `generate_latex_table` file in place.
 
-camspork C++:
+camspork C++ and Python wrapper:
 
+* `spork/camspork/camspork.py`: builder API, eliminate temporal stuff and write-only flag
 * `lib/syncv/tl_sig.hpp`: delete `QualBitsByVis`, vis flag constants; `TlSigInterval` holds one `qual_bits_t`. `TlSigIntervalListNode` shrinks 28 → 16 bytes (update the `static_assert`s).
-* `lib/syncv/syncv_table.cpp` (~84 flag references; the "horror file"): `alloc_vis_record`, `union_tl_sig_interval`, `synchronizes_with`, `any/all_visible_to`, `from_L2` (delete), `AugmentVisRecordCallback`, join-threads command (already just unions bits), mutate checks (~line 2255), hash + validation (~line 2862), excut dump (~line 3030).
+* `lib/syncv/syncv_table.cpp` (~84 flag references; the "horror file"): `alloc_vis_record`, `union_tl_sig_interval`, `synchronizes_with`, `any/all_visible_to`, `from_L2` (delete), `AugmentVisRecordCallback`, join-threads command (already just unions bits), mutate checks (~line 2255), hash + validation (~line 2862), excut dump (~line 3030), branching on write-only flag.
 * `lib/syncv/syncv_table.hpp`: `SyncvAccessInfo` (stale comment mentions `vis_level_unordered` / `vis_level_full_ordered` — legacy "visibility level" wording).
 * `lib/syncv/vis_record_history_log.*`: error formatting.
 * `lib/program/{grammar.hpp,builder.*,exec.cpp,print.hpp,camspork_excut.*}`: drop `L2_temporal_qual_bits`; SyncEnv construction takes class bitmasks.
-* camspork self-tests in `camspork.py` using hard-coded `atomic_qual_bits`.
+* camspork self-tests in `camspork.py` (David Zhao Akeley: executive decision, just delete this old crap)
+* also rename "extended timeline set" to "precondition timeline set" everywhere.
+* Add brief comments only in `spork_b`, starting with `% no-VF:`, for outdated stuff for human to fix.
 
-Tests:
+Tests (after C++ changes):
 
 * ~3 goldens print `q -> atomic-only temporal full issue` (`tests/golden/cuda/test_3cycle_mbarrier/*`).
 * `tests/cuda/test_claude_cuda_sync_err.py` expectations.
 
-Docs (`spork/docs/spork_b`, read-only for now; list for the eventual doc rewrite):
+Docs (`spork/docs/spork_b`, read-only for now except comments; list for the eventual doc rewrite):
 `gVisFlag`, `gVisLevel`, `gVisSet`, `gTlSig`, `gVisRecord`, `gExtQualTL`, `gSyncTL` (table), `VisRecordState`, `VisRecordCreation`,
 `Witness` (its "TODO is VF_full needed" becomes moot), `Augment`, `CheckVisRecordHelper`, `ChecksOnRead/Mutate/Free`,
 `AccessBeforeSync`, `AccessAfterSync`, `Transitivity`, `gOooOpt`, `AtomicInstr`, `InstrTL`.
 
-## Test plan
+## Test plan (after all changes)
 
+* David Zhao Akeley: For this and the proxy fence changes, run only the `tests/cuda` tests so I don't die of old age waiting for the full test suite. If you forget it's fine.
 * All existing goldens and sync-check tests should pass unchanged except the vis-flag-printing goldens,
   *provided* the proxy-fence plan's sync-tl changes to examples land at the same time (otherwise the WAW-through-`cuda_temporal` path breaks every TMA ring pipeline).
 * New unit tests for the class-mask sanity checks (each as a positive/negative `mkproc` pair, see `tests/cuda/CLAUDE.md`).
+  David Zhao Akeley: not sure what this was referring to???
 * Out-of-order soundness regression: two TMA writes to the same SMEM by the same thread with no sync must be rejected (this is the case that dropping `VF_issue` naively would silently accept).
+* Human needs to do H100 testing after proxy fence changes. NOT DONE YET REPLACE WITH COMMIT HASH OF TESTED Exo VERSION WHEN DONE.
+* David Zhao Akeley: Actually high-quality testing of camspork is deferred to much later or never

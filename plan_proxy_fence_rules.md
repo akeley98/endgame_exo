@@ -75,6 +75,9 @@ This contradicts the rule above and is accepted as a pragmatic exception, to be 
 Option if we want zero exceptions: for memory types whose mask contains async-RAM QualTLs, run the free check twice (`{cuda2}` and `{async}`).
 Kernels would then end tasks with `Fence(cuda_in_order, cuda_generic_and_async_proxy)`: one fence per task (not per stage), also paid by async-only kernels.
 
+David Zhao Akeley: we're sticking with `cuda_in_order_ram_qual` only for now.
+Add a comment in `spork_b` to remind me to document the pragmatic exception.
+
 ## Code touched
 
 * `spork/timelines.py`: sync-tl definitions (see vis-flag plan).
@@ -83,9 +86,11 @@ Kernels would then end tasks with `Fence(cuda_in_order, cuda_generic_and_async_p
 * Examples using `cuda_temporal` (all need rewriting; list from grep on 2026-09-24):
   * `platforms/Sm90/tk_gemm_util.py` (raw/war/wgmma_cg; also the commit-group Await L2 must contain async so the async-only war Arrive can witness)
   * `sporkbench/examples/Sm90a_tk_fa/exocc_Sm90a_tk_attn_fwd.py` (q/k/v produced/consumed) — sporkbench edits need human buy-in
+  * David Zhao Akeley: replacing `L1=cuda_temporal` with `L1=cuda_mbarrier_only` and `L2=cuda_temporal` with `L2=cuda_async_proxy_retired` has buy-in; inform me of other required changes before changing.
   * `tests/cuda/test_tma.py`, `tests/cuda/test_cuda_sync.py` (mbarrier qual configs, `Fence(Sm80_*, cuda_temporal)`), `tests/cuda/test_3cycle_mbarrier.py`, `tests/cuda/test_ring_buffer_scheduling.py`, `tests/cuda/test_claude_*`
   * `Await(C_barrier, cuda_temporal, 0)` somewhere in tests (grep)
 * Error message in `generate_arrive` ("use cuda_temporal, and add trailing barriers to TMA instrs") and the test asserting it (`test_mbarriers_wrong_tma`).
+* David Zhao Akeley: presumably `cuda_mbarrier_only` is the new `cuda_temporal` for the above hint.
 * Goldens for all of the above.
 
 ## Deferred to a future project
