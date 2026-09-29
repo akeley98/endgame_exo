@@ -1,6 +1,6 @@
 # Plan: Proxy Fence Rules, Remove `cuda_temporal`
 
-Status: design agreed (2026-09-25), not started.
+Status: design agreed (2026-09-25); implemented 2026-09-29 (pure Python). H100 testing pending.
 
 Depends on: [plan_remove_vis_flags.md](plan_remove_vis_flags.md) (QualTL proxy class; single precondition set). Land together.
 Evidence and caveats: [plan_sync_semantics_research.md](plan_sync_semantics_research.md).
@@ -96,3 +96,17 @@ Add a comment in `spork_b` to remind me to document the pragmatic exception.
 ## Deferred to a future project
 
 Memory/proxy fences should probably be modeled head-on (a fence "on the causality chain" between two accesses) rather than folded into QualTLs and sync-tl set membership.
+
+## Implementation notes (2026-09-29)
+
+* Names: async-only sync-tl is `cuda_async_proxy_retired = {mbar, async}` (human's name from `f0df2875`); `cuda_mbarrier_only = {mbar}` kept separate (used as the "data ready" Arrive L1).
+* `timelines.needs_proxy_fence(L1, L2)` implements the rule; used by garden-variety/cluster `Fence` and mbarrier `Await`. Commit groups assert it is false.
+  `generate_arrive` accepts any L1 that is a subset of `cuda_generic_and_async_proxy` as plain `mbarrier.arrive`, checked before `Sm80_cp_async` (`cuda_mbarrier_only` is a subset of both).
+  Fence L2 is now always validated (previously `L1 = cuda_temporal` skipped the L2 check).
+* `tk_gemm_util.py`: producer `Await(war, cuda_async_proxy_retired)`, `Arrive(cuda_mbarrier_only) >> raw`; consumer commit-group Awaits now `cuda_generic_and_async_proxy` (were `cuda_in_order`),
+  consumer `Arrive(config.consumer_war_sync_tl()) >> war`: `cuda_async_proxy_retired`, or `cuda_generic_and_async_proxy` when `A_in_rmem` (consumer reads A_smem with generic loads, so it gets a proxy fence).
+  Epilogue `Await(C_barrier, cuda_in_order)` (was `cuda_temporal`; the next access is a generic write of C_smem, so the precondition needs cuda2).
+  Generated code for all sporkbench gemm examples is identical to before (modulo comments).
+* `test_tma.py` `war` now gets `fence.proxy.async` (new, as planned). New mbarrier goldens `async_to_async` (no fence) and `in_order_to_async` (fence); `temporal_to_wgmma` tests renamed `mbarrier_only_to_wgmma`.
+* sporkbench `Sm90a_tk_fa`: applied the approved substitution only. That alone adds `fence.proxy.async` to the producer's q/k/v Awaits (consumer arrives are `Arrive(cuda_in_order)`).
+  Also changed (approved 2026-09-29): consumer `Arrive(cuda_in_order) >> {q,k,v}_consumed` -> `Arrive(cuda_async_proxy_retired)`. Passes sync-check and generates code identical to before the rewrite.

@@ -1,6 +1,6 @@
 # Plan: Remove Visibility Flags
 
-Status: design agreed (2026-09-25), not started.
+Status: design agreed (2026-09-25); pure Python part implemented 2026-09-29 (see Implementation notes); camspork C++ not started.
 
 Depends on: nothing. Should land together with (or immediately before) [plan_proxy_fence_rules.md](plan_proxy_fence_rules.md),
 since that plan removes the last reason for the temporal/full distinction.
@@ -145,5 +145,26 @@ Docs (`spork/docs/spork_b`, read-only for now except comments; list for the even
 * New unit tests for the class-mask sanity checks (each as a positive/negative `mkproc` pair, see `tests/cuda/CLAUDE.md`).
   David Zhao Akeley: not sure what this was referring to???
 * Out-of-order soundness regression: two TMA writes to the same SMEM by the same thread with no sync must be rejected (this is the case that dropping `VF_issue` naively would silently accept).
-* Human needs to do H100 testing after proxy fence changes. NOT DONE YET REPLACE WITH COMMIT HASH OF TESTED Exo VERSION WHEN DONE.
+* Human needs to do H100 testing after proxy fence changes. Tested Exo `ffabf0cd17262c992966dbed676c06f731ba863f`, sporkbench `e2ff95c97c1fe30b4b9838d01b72c834b4c4f049`, Sm90a `tests/cuda/` tests, `Sm90_row_major_gemm`, `Sm90_tk_fa`.
 * David Zhao Akeley: Actually high-quality testing of camspork is deferred to much later or never
+
+## Implementation notes (pure Python, 2026-09-29)
+
+* `Qual_tl(name, default_convergent_access, impl_class, proxy_class)`; `get_impl_class_bits` / `get_proxy_class_bits`.
+  Atomic QualTLs got proxy classes too (`cuda_generic_atomic_qual` generic, `tma_to_gmem_atomic_qual` async) for documentation only; they never appear in a sync-tl.
+* Review of `f0df2875` (human commit), differences from the plan / fixes:
+  * Fixed: `get_all_out_of_order_bits` / `get_all_atomic_bits` OR'd `Qual_tl` objects (not bits), and called nonexistent `q.atomic()`. They were unused, so nothing broke.
+  * Fixed: `AllocableMemWin.qual_tl_dict` default (`core/memory.py`) still had raw `Qual_tl` values (not `InstrQuals`).
+  * Added: `InstrQuals` also asserts no atomic QualTL in the precondition set.
+  * `cuda_tmem_qual_tl_dict` semantics changed intentionally (human, 2026-09-29): tcgen05.cp precondition was `{cp}`, now `{mma}`; tcgen05.shift was `{shift, mma}`, now `{mma}`.
+    The backwards comments on the tcgen05.mma entry were fixed (precondition member `q` means "access with initial `q` -> this access").
+  * `wgmma_fence_1` including `wgmma_rmem_fenced_qual` is intentional (harmless; only allows re-witnessing already-fenced records).
+* `AccessInfo.out_of_order` and `AccessInfo.write_only` are deleted (the latter was only used for the write-only flag).
+  No subtlety found: every instr that set `out_of_order` agreed with the initial QualTL's class.
+  camspork's `ooo_flag` is still sent (derived from the initial QualTL) because `exec.cpp` reads `is_ooo` only from that flag bit; dropping it would silently accept out-of-order WAW.
+* SHIM in `sync_check.py`: same bits for `L2_full` and `L2_temporal`; `write_only_flag` never set. With the current C++, `VF_temp` and `VF_full` are then always set together, so every check is effectively the single precondition-set check.
+  Goldens printing vis flags are unchanged; `test_3cycle_mbarrier` error dumps lost their `(temporal) cuda_async_proxy_retired_qual` lines.
+* "rename extended -> precondition" done in exo Python except the camspork Python wrapper (`camspork.py` parameter names), which is left for the C++ step.
+* Tests: `tests/cuda/test_timeline_classes.py` (class-mask sanity; interpreted "unit tests for the class-mask sanity checks" as plain pytest unit tests of the Python asserts, not `mkproc` pairs) and `test_tma.py::test_tma_waw_{positive,negative}` (out-of-order soundness regression).
+* Docs: `spork_b/gSyncTL.tex` now `\input`s the generated `SyncTLTable.tex` and `QualTL.tex`; `% no-VF:` comments added across `spork_b`.
+  Doc/code mismatch unrelated to the rewrite: `MbarrierUsage.tex` and `CommitGroupUsage.tex` say `cuda_generic_or_async_proxy`; the code name is `cuda_generic_and_async_proxy`.

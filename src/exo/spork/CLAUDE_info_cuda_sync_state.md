@@ -6,8 +6,9 @@
 * `CudaBasicCommitGroup` → `add_commit_group` (`cp.async`, TMA store, wgmma commit/wait groups; never emits a proxy fence).
 * `CudaClusterSync` → cluster sync.
 
-Proxy fence decisions are currently subset tests on sync-tls (`cuda_temporal.implements_first(L1)`, `cuda_in_order.implements_second(L2)`, ...);
-to be replaced by a single QualTL-proxy-class rule ([plan_proxy_fence_rules.md](../../../plan_proxy_fence_rules.md)).
+Proxy fences (`fence.proxy.async` after the sync) follow `timelines.needs_proxy_fence(L1, L2)`: L1 has a generic-RAM QualTL and L2 has an async-RAM QualTL ([plan_proxy_fence_rules.md](../../../plan_proxy_fence_rules.md)).
+Sync-tl subset tests remain only for validating which sync-tls a mechanism accepts.
+`generate_arrive` checks "subset of `cuda_generic_and_async_proxy`" (plain `mbarrier.arrive`) *before* `Sm80_cp_async`, since `cuda_mbarrier_only` is a subset of both.
 
 `add_barrier` used to trigger `CudaDeviceSetupBuilder.require_proxy_fence()` (post-`mbarrier.init` `fence.proxy.async`); removed as folklore in exo `84ef21b4` ([plan_mbarrier_codegen.md](../../../plan_mbarrier_codegen.md)).
 

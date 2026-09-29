@@ -10,3 +10,5 @@ The atomic-only intervals span all threads `[0, UINT32_MAX)`; excluding them fro
 This relies on atomic QualTLs never being witnessed (never in L1).
 
 Planned: `QualBitsByVis` → `qual_bits_t`; delete vis flag machinery; SyncEnv told which bits are atomic / out-of-order ([plan_remove_vis_flags.md](../../../../../../plan_remove_vis_flags.md)).
+Until then, the Python side (exo `sync_check.py`) shims the no-VF model: it passes the same bits as `L2_full` and `L2_temporal`, never sets `write_only_flag`,
+and sets `ooo_flag` iff the initial QualTL is out-of-order class (`exec.cpp` reads `is_ooo` only from that flag, so it can't be dropped yet).
