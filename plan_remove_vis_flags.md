@@ -119,9 +119,11 @@ camspork C++ and Python wrapper:
 
 * `spork/camspork/camspork.py`: builder API, eliminate temporal stuff, write-only flag, out-of-order flag
 * `lib/syncv/tl_sig.hpp`: delete `QualBitsByVis`, vis flag constants; `TlSigInterval` holds one `qual_bits_t`. `TlSigIntervalListNode` shrinks 28 → 16 bytes (update the `static_assert`s).
-* `lib/syncv/syncv_table.cpp` (~84 flag references; the "horror file"): `alloc_vis_record`, `union_tl_sig_interval`, `synchronizes_with`, `any/all_visible_to`, `from_L2` (delete), `AugmentVisRecordCallback`, join-threads command (already just unions bits), mutate checks (~line 2255), hash + validation (~line 2862), excut dump (~line 3030), branching on write-only flag. Non-convergent out-of-order optimization now relies on class bitmasks.
+* `lib/syncv/syncv_table.cpp` (~84 flag references; the "horror file"): `alloc_vis_record`, `union_tl_sig_interval`, `synchronizes_with`, `any/all_visible_to`, `from_L2` (delete), `AugmentVisRecordCallback`, join-threads command (already just unions bits), mutate checks (~line 2255), hash + validation (~line 2862), excut dump (~line 3030), branching on write-only flag. Non-convergent out-of-order optimization assertion needs to change to be based on whether the initial qual tl is out-of-order: `CAMSPORK_REQUIRE(access.is_ooo || granularity == 1, -of-order non-convergent abstract machine optimization not applicable when !is_ooo")`;
+* David: The camspork excut stuff is abandoned and not actually useful for testing. All I need is for it to compile at all since it's useful as stubs for if I put a better tracing system in.
+* David: current `VF_atom` exclusion for hashing has to now exclude tl-sigs with atomic Qual TL.
 * `lib/syncv/syncv_table.hpp`: `SyncvAccessInfo` (stale comment mentions `vis_level_unordered` / `vis_level_full_ordered` — legacy "visibility level" wording).
-* `lib/syncv/vis_record_history_log.*`: error formatting.
+* `lib/syncv/vis_record_history_log.*`: error formatting, get rid of `-> visibility flags` stuff and leave comment reminder in `spork_b` to document
 * `lib/program/{grammar.hpp,builder.*,exec.cpp,print.hpp,camspork_excut.*}`: drop `L2_temporal_qual_bits`; SyncEnv construction takes class bitmasks.
 * camspork self-tests in `camspork.py` (David Zhao Akeley: executive decision, just delete this old crap)
 * also rename "extended timeline set" to "precondition timeline set" everywhere.
@@ -132,7 +134,7 @@ Tests (after C++ changes):
 * ~3 goldens print `q -> atomic-only temporal full issue` (`tests/golden/cuda/test_3cycle_mbarrier/*`).
 * `tests/cuda/test_claude_cuda_sync_err.py` expectations.
 
-Docs (`spork/docs/spork_b`, read-only for now except comments; list for the eventual doc rewrite):
+Docs (`spork/docs/spork_b`, read-only for this plan except comments; list for the eventual doc rewrite):
 `gVisFlag`, `gVisLevel`, `gVisSet`, `gTlSig`, `gVisRecord`, `gExtQualTL`, `gSyncTL` (table), `VisRecordState`, `VisRecordCreation`,
 `Witness` (its "TODO is VF_full needed" becomes moot), `Augment`, `CheckVisRecordHelper`, `ChecksOnRead/Mutate/Free`,
 `AccessBeforeSync`, `AccessAfterSync`, `Transitivity`, `gOooOpt`, `AtomicInstr`, `InstrTL`.
@@ -162,6 +164,7 @@ Docs (`spork/docs/spork_b`, read-only for now except comments; list for the even
 * `AccessInfo.out_of_order` and `AccessInfo.write_only` are deleted (the latter was only used for the write-only flag).
   No subtlety found: every instr that set `out_of_order` agreed with the initial QualTL's class.
   camspork's `ooo_flag` is still sent (derived from the initial QualTL) because `exec.cpp` reads `is_ooo` only from that flag bit; dropping it would silently accept out-of-order WAW.
+  David Zhao Akeley: I don't think this is true because the TMA-to-SMEM instrs have only `cuda_async_proxy_retired_qual` as precondition, never `tma_to_smem_async_qual` itself.
 * SHIM in `sync_check.py`: same bits for `L2_full` and `L2_temporal`; `write_only_flag` never set. With the current C++, `VF_temp` and `VF_full` are then always set together, so every check is effectively the single precondition-set check.
   Goldens printing vis flags are unchanged; `test_3cycle_mbarrier` error dumps lost their `(temporal) cuda_async_proxy_retired_qual` lines.
 * "rename extended -> precondition" done in exo Python except the camspork Python wrapper (`camspork.py` parameter names), which is left for the C++ step.
