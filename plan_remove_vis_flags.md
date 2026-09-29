@@ -31,7 +31,7 @@ In practice the 4 flags only ever appear in fixed bundles, and encode 3 facts:
 ## New QualTL attributes
 
 Each `Qual_tl` (`spork/timelines.py`) gets two attributes.
-The implementation class must be delivered to camspork (SyncEnv) at construction, as bitmasks.
+The implementation class must be delivered to camspork (SyncEnv) at construction, as bitmasks (which QualTL are out-of-order; which are atomic).
 
 ### Implementation class (affects camspork optimizations)
 
@@ -117,9 +117,9 @@ Pure Python:
 
 camspork C++ and Python wrapper:
 
-* `spork/camspork/camspork.py`: builder API, eliminate temporal stuff and write-only flag
+* `spork/camspork/camspork.py`: builder API, eliminate temporal stuff, write-only flag, out-of-order flag
 * `lib/syncv/tl_sig.hpp`: delete `QualBitsByVis`, vis flag constants; `TlSigInterval` holds one `qual_bits_t`. `TlSigIntervalListNode` shrinks 28 → 16 bytes (update the `static_assert`s).
-* `lib/syncv/syncv_table.cpp` (~84 flag references; the "horror file"): `alloc_vis_record`, `union_tl_sig_interval`, `synchronizes_with`, `any/all_visible_to`, `from_L2` (delete), `AugmentVisRecordCallback`, join-threads command (already just unions bits), mutate checks (~line 2255), hash + validation (~line 2862), excut dump (~line 3030), branching on write-only flag.
+* `lib/syncv/syncv_table.cpp` (~84 flag references; the "horror file"): `alloc_vis_record`, `union_tl_sig_interval`, `synchronizes_with`, `any/all_visible_to`, `from_L2` (delete), `AugmentVisRecordCallback`, join-threads command (already just unions bits), mutate checks (~line 2255), hash + validation (~line 2862), excut dump (~line 3030), branching on write-only flag. Non-convergent out-of-order optimization now relies on class bitmasks.
 * `lib/syncv/syncv_table.hpp`: `SyncvAccessInfo` (stale comment mentions `vis_level_unordered` / `vis_level_full_ordered` — legacy "visibility level" wording).
 * `lib/syncv/vis_record_history_log.*`: error formatting.
 * `lib/program/{grammar.hpp,builder.*,exec.cpp,print.hpp,camspork_excut.*}`: drop `L2_temporal_qual_bits`; SyncEnv construction takes class bitmasks.
