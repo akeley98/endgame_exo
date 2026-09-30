@@ -179,7 +179,7 @@ Docs (`spork/docs/spork_b`, read-only for this plan except comments; list for th
   `test_tma_waw_negative` (two TMA writes, no sync) is still rejected with no flag sent.
   The only remaining use, the non-convergent optimization `REQUIRE`, now tests `initial_qual_bit & ooo_qual_mask`.
 * Class bitmasks: `syncv_init_t::{ooo_qual_mask, atomic_qual_mask}`, passed via `ProgramEnv(builder, ooo_qual_mask=, atomic_qual_mask=)` (Python; required keywords unless copying) / `camspork_new_ProgramEnv(builder, ooo, atomic)`.
-  `sync_check.py` passes `Qual_tl.get_impl_class_bits("out_of_order" / "atomic")`.
+  `sync_check.py` passes `Qual_tl.get_impl_class_bits(QualImplClass.out_of_order / .atomic)` (impl/proxy classes are the `QualImplClass` / `QualProxyClass` Enums in `timelines.py`, not strings).
   Chose ProgramEnv over the program header: the masks are global per Exo process, and it avoids a grammar/header change.
 * camspork `REQUIRE`s: ooo ∩ atomic = ∅ (construction); L1 and L2 ∩ atomic = ∅ (Fence/Arrive/Await); per access: precondition ∩ ooo = ∅, `atomic_qual_bits == precondition & atomic_mask`, atomic only on mutates, initial ∩ atomic = ∅ (not for free-checks).
 * `atomic_qual_bits` kept as a separate access field (redundant with `precondition & atomic_mask`, now enforced equal) to avoid grammar churn.
