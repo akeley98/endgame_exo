@@ -1,6 +1,6 @@
 # Plan: Remove Visibility Flags
 
-Status: design agreed (2026-09-25); pure Python part implemented 2026-09-29 (see Implementation notes); camspork C++ not started.
+Status: design agreed (2026-09-25); pure Python part implemented 2026-09-29; camspork C++ implemented 2026-09-29 (see Implementation notes).
 
 Depends on: nothing. Should land together with (or immediately before) [plan_proxy_fence_rules.md](plan_proxy_fence_rules.md),
 since that plan removes the last reason for the temporal/full distinction.
@@ -171,3 +171,28 @@ Docs (`spork/docs/spork_b`, read-only for this plan except comments; list for th
 * Tests: `tests/cuda/test_timeline_classes.py` (class-mask sanity; interpreted "unit tests for the class-mask sanity checks" as plain pytest unit tests of the Python asserts, not `mkproc` pairs) and `test_tma.py::test_tma_waw_{positive,negative}` (out-of-order soundness regression).
 * Docs: `spork_b/gSyncTL.tex` now `\input`s the generated `SyncTLTable.tex` and `QualTL.tex`; `% no-VF:` comments added across `spork_b`.
   Doc/code mismatch unrelated to the rewrite: `MbarrierUsage.tex` and `CommitGroupUsage.tex` say `cuda_generic_or_async_proxy`; the code name is `cuda_generic_and_async_proxy`.
+
+## Implementation notes (camspork C++, 2026-09-29; exo `57d5da92`)
+
+* David was right about `is_ooo`: the out-of-order access flag is deleted end to end (`access_flag_ooo`, `ProgramBuilder.ooo_flag`, `SyncvAccessInfo::is_ooo`).
+  The previous note's claim was wrong: with no vis flags, an out-of-order initial QualTL can only matter through witness (L1), since it is never in any precondition set; nothing needs a per-access flag.
+  `test_tma_waw_negative` (two TMA writes, no sync) is still rejected with no flag sent.
+  The only remaining use, the non-convergent optimization `REQUIRE`, now tests `initial_qual_bit & ooo_qual_mask`.
+* Class bitmasks: `syncv_init_t::{ooo_qual_mask, atomic_qual_mask}`, passed via `ProgramEnv(builder, ooo_qual_mask=, atomic_qual_mask=)` (Python; required keywords unless copying) / `camspork_new_ProgramEnv(builder, ooo, atomic)`.
+  `sync_check.py` passes `Qual_tl.get_impl_class_bits("out_of_order" / "atomic")`.
+  Chose ProgramEnv over the program header: the masks are global per Exo process, and it avoids a grammar/header change.
+* camspork `REQUIRE`s: ooo ∩ atomic = ∅ (construction); L1 and L2 ∩ atomic = ∅ (Fence/Arrive/Await); per access: precondition ∩ ooo = ∅, `atomic_qual_bits == precondition & atomic_mask`, atomic only on mutates, initial ∩ atomic = ∅ (not for free-checks).
+* `atomic_qual_bits` kept as a separate access field (redundant with `precondition & atomic_mask`, now enforced equal) to avoid grammar churn.
+* `TlSigInterval` holds one `qual_bits_t`; node 28 → 16 bytes. `is_atomic_only(atomic_mask)` drives the memoization hash exclusion and its validation.
+* Single L2 for `Fence`/`Await` (builder, grammar, print, Python wrapper); `access_flag_write_only` deleted (bits 1 and 8 retired, `access_flag_all_bits = 6`). SyncEnvFreeShard is now a plain precondition check (was temporal-only; same under the SHIM).
+* History log: tl-sig lines print just the QualTL name; missing-tl-sig error reads `VisRecord did not have tl-sig for`; sync statement labels read `First/Second sync-tl (set of qual-tl):` (was `First/Second qual-tl set:`). Fence/Arrive/Await detection in the log switched from the L2-temporal hack to `sync_stmt_name`.
+* excut: `TlSigInterval` action now has 3 args `[tid_lo, tid_hi, qual_bits]` (compiles; not otherwise tested).
+* `extended_qual_bits` → `precondition_qual_bits` throughout camspork; `camspork.py` self-tests (`so_called_temporary_test`) deleted.
+* The git-tracked `src/exo/spork/camspork/libcamspork.so` (2025-06-30) is stale and unused by the JIT; not rebuilt.
+* Docs: `% no-VF:` comments updated/added in `VisRecordState.tex`, `CamsporkDetails.tex`, `Witness.tex` and `Augment.tex` (name g* × τ_pre / g* × τ_post the first/second visibility set; prefer "synchronizes-with" over "witness"), `gExtQualTL.tex` and `AtomicInstr.tex` (precondition vocab split, below).
+* Side effect in history log: `Arrive` with an empty first sync-tl (e.g. `CudaMbarrierPreArrive`) used to print no barrier info, because the old code guessed Arrive/Await from `L1 == 0` / `L2_temporal == 0` and those arrives matched both.
+  They now print barrier, arrive/await count, and an empty first sync-tl list (visible in the `test_3cycle_mbarrier` goldens).
+* Tests (`tests/cuda`, 2026-09-29): 327 passed, 5 failed before golden update: the 4 `test_3cycle_mbarrier` goldens (expected: flag lines, error header, pre-arrive log lines) and `test_Sm90a_gemm_remarks`.
+  That last one was already stale: `tk_gemm_util.py` line numbers moved in exo `37909183`. All 5 goldens regenerated and reviewed; the remarks diff is line numbers only (committed separately as exo `28a392a8`).
+* Vocab issue (unresolved): "precondition" differs between Python and camspork. `InstrQuals.precondition_bits` never has atomic QualTLs; `sync_check.py` ORs in `atomicity.qual_tl_list` bits, and that OR'd set is camspork's `precondition_qual_bits` (the set checked, and the "OR" list in missing-tl-sig errors). The camspork meaning is the right one for "precondition timeline set". `% no-VF:` notes are in `gExtQualTL.tex` and `AtomicInstr.tex`; code comment at the OR in `sync_check.py`.
+
