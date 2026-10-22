@@ -387,11 +387,21 @@ preview/
 
 ## Open questions
 
-* **Listing filter syntax (needs a dedicated discussion with David).** Legacy directives never needed to know where filters end
-  (`color line` took its letters from the next line). The new parser ends the filter list at the first unquoted color name,
-  which is why listing names can't be color names or mark positions (`RESERVED_LISTING_NAMES` in `listing_parse.py`).
-  Proposed: filters as one comma-joined word for every directive (`color cpu[1],cpu[3] blue "accum"`, `begin cpu[:4],reorder_loops[0]`),
-  making all directives positional and removing the reserved names. Alternative: trailing `in FILTERS...`.
+* **Listing filter syntax: DECIDED 2026-10-21, not yet implemented.** Requirements (David): filters are distinguished syntactically,
+  not by recognizing special words; one directive can apply several colors (vertical space matters for human readers, who will write many slides by hand).
+  Filters are always the first word after the directive name, comma-joined, no spaces, for every directive
+  (`begin cpu[:4],reorder_loops[0]`, `mark split raw_await end`). This removes `RESERVED_LISTING_NAMES`.
+  Color directive grammar:
+  ```
+  colorDirective → "# TeX: color" filters coloring+
+  filters        → filter ("," filter)*          (one word)
+  coloring       → colorName match+               (color word is sticky until the next color word)
+  match          → quotedString index?
+  index          → N ":" I  |  N ":*"            (omitted: exactly 1 match)
+  ```
+  Example: `# TeX: color cpu[3:] violet "n" 2:0 "seq" blue "k"`. Remaining tokens are classified by shape (quoted / `N:I` / bare word);
+  an unknown bare word is an error. Rejected (David optimizes for visual scanning; directives must start where expected):
+  `;`-separated clauses with different filters, and trailing `# TeX:` directives on code lines.
   Changing it touches the parser, README, REFERENCE_CARD, test fixtures, and `beamer_nyc25_test/samples.py`.
 * **arXiv rejects `\colorbox` highlighting** (auto-rejection by regex), even though the boxes are an accessibility feature
   (e.g. legible for protanopia; the colors were tuned to stay distinguishable). `\sporkRed` etc. mean "our current style's way of
