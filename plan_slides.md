@@ -1,6 +1,8 @@
 # Plan: Shared Paper/Slides Build (`code_to_tex` package, Beamer)
 
-Status: design agreed with David (2026-10-21); not implemented.
+Status: design agreed with David (2026-10-21). Phases 1-2 (package: spork_style.tex, listing generator, build driver incl. `--arxiv`) implemented 2026-10-21, 204 tests passing;
+phases 3-4 (amspork3 migration, `beamer_nyc25_test` smoke deck) done; phase 5 reference card at `spork/docs/code_to_tex/REFERENCE_CARD.md`.
+Remaining: open questions and the smoke-test fix list below; phase 6 `--arxiv` exists but is untested on amspork3. See "Implementation notes" at the end.
 
 Depends on: nothing in `exo`.
 Requirements source: [plan_slides_human_wishlist.md](plan_slides_human_wishlist.md) (David's wishlist; this plan elaborates it).
@@ -385,8 +387,46 @@ preview/
 
 ## Open questions
 
-None currently.
+* **Listing filter syntax (needs a dedicated discussion with David).** Legacy directives never needed to know where filters end
+  (`color line` took its letters from the next line). The new parser ends the filter list at the first unquoted color name,
+  which is why listing names can't be color names or mark positions (`RESERVED_LISTING_NAMES` in `listing_parse.py`).
+  Proposed: filters as one comma-joined word for every directive (`color cpu[1],cpu[3] blue "accum"`, `begin cpu[:4],reorder_loops[0]`),
+  making all directives positional and removing the reserved names. Alternative: trailing `in FILTERS...`.
+  Changing it touches the parser, README, REFERENCE_CARD, test fixtures, and `beamer_nyc25_test/samples.py`.
+* **arXiv rejects `\colorbox` highlighting** (auto-rejection by regex), even though the boxes are an accessibility feature
+  (e.g. legible for protanopia; the colors were tuned to stay distinguishable). `\sporkRed` etc. mean "our current style's way of
+  marking something red", not "a box". Planned: a switch in `spork_style.tex` that renders the highlights without `\colorbox`
+  (alternatives TBD: colored text, underline, frame), turned on by `--arxiv`. Deferred by David until slides are written; alternatives untested.
+
+## Fix list from the smoke test (2026-10-21; not yet done)
+
+1. Viewer copy rule: evince crashes on half-written PDFs and on PDFs with undefined references, so copy only when xelatex produced
+   a PDF with **no LaTeX errors and no undefined references** (also refuse on nonzero xelatex exit). Overfull boxes etc. never block (they are what "partial progress" meant).
+2. Listing lines wrap silently at colored boxes (`\sporkListingBox` uses breakable `\hspace{-\fboxsep}`): use `\kern`, and set each line in an `\hbox` so overlong lines become Overfull warnings.
+3. `\sporkCodeRule` spans to the page edge on slides (running `\hrule` in Beamer's wider vbox): use `\rule{\linewidth}{0.4pt}`.
+4. Standalone figure skeleton should be `[beamer,aspectratio=169]{standalone}` (4:3 page clips wide figures in `--figure` previews); update plan, README, `spork_style.tex` header.
+5. Figure fonts: use `execute at begin picture={\sffamily}` so node `font=\bfseries` stays sans; consider a shared absolute figure/listing font size (`\sporkFigFont`), since body sizes differ between paper (10/11pt) and slides (12pt).
+6. `--figure --png`: crop all steps of a figure to their union bounding box so step-to-step movement is visible.
+7. Viewer copy name doubles when deck name == directory name (`beamer_nyc25_test_beamer_nyc25_test.pdf`); e.g. use `<dir>_<deck>.pdf` only when they differ.
+8. README tips: `overlayarea` for step-varying text heights; `(pic cs:a -| X)` doesn't parse, define a `\coordinate` first.
 
 Decided: `\sporkListing` defaults to `\only` (code grows; matches the old per-version-file slides), `reserve` opt-in;
 frames holding growing listings are recommended top-aligned (`[t]`), since Beamer's default vertical centering moves *all* lines when the listing grows.
 Standalone figures compile in slides mode (see Figures). Tests are pytest inside the package; installing TeX/apt dependencies (`overlay-beamer-styles`, `pdfcrop`, ...) is allowed, choose whichever path is less hassle at implementation time.
+
+## Implementation notes (2026-10-21; the package README and `spork_style.tex` header comments are the detailed reference)
+
+* Package modules: `listing.py` (API) + `listing_parse.py`, `listing_layout.py`, `listing_render.py`; `build.py` + `build_log.py`, `build_aux.py`, `build_arxiv.py`;
+  `latex/spork_style.tex`, `latex/code_to_tex_support.tex`. Tests: `cd spork/docs && python3 -m pytest code_to_tex/tests`. No new dependencies were installed.
+* **standalone.sty patch**: a figure's own preamble line `\newif\ifsporkSlides` (any `\if...` token) made `\input` of the figure fail ("Incomplete \iffalse")
+  because of how standalone skips the figure preamble. `spork_style.tex` redefines standalone's internal `\sa@gobble`; this depends on the installed standalone version.
+* **beamerarticle** makes `\textrm` etc. overlay-aware, so unbraced `_\textrm{lo}` inside `\hyperref` arguments stops compiling; write `_{\textrm{lo}}`.
+* **Marks inside TikZ node text land in the wrong place under xelatex** (xdvipdfmx moves node text with a PDF transform that `\pdfsavepos` never sees).
+  Probably the real cause of the old `\bugYFix` hack. Put listings in normal text/minipages and overlay a `remember picture` picture. Marks use `\pgfmark` (tikzmark library, `pic cs:`).
+  Calibrated defaults: `\sporkMarkXShift` = 0pt, `\sporkMarkYShift` = 0.5ex.
+* **Beamer pitfall**: in `\begin{frame}{Title}{\small ...}` the braced group becomes the (unshown) frame subtitle, so the content vanishes silently.
+* TikZ hiding keys (`spork reveal`, `spork slide only`, `spork paper only`) use opacity 0: layout and anchors are kept, but hidden text stays in the PDF text layer.
+  Wrapping a whole element in `\sporkSlideOnly`/`\sporkPaperOnly` removes it entirely.
+* Listing lines are one paragraph each (not `\\`-separated), so a listing inside a TikZ node needs `text width` or a minipage.
+* `--png` crops only `--figure` renders; deck/frame/paper pages keep page bounds so placement is visible.
+* `.gitignore` additionally needs `*_paperpreview.tex`, `*.fls`, `*.bbl`, `*.blg`.
