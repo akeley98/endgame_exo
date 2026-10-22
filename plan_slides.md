@@ -410,6 +410,12 @@ preview/
   marking something red", not "a box". Planned: a switch in `spork_style.tex` that renders the highlights without `\colorbox`
   (alternatives TBD: colored text, underline, frame), turned on by `--arxiv`. Deferred by David until slides are written; alternatives untested.
 
+* **Possible future guard (not approved yet): shared-geometry check.** Verified 2026-10-21 that a `spork figure` figure has identical
+  node coordinates (to 1e-5pt) standalone, in the paper, and in a deck (before `\scalebox`). What breaks this is host-relative sizing
+  (`\small` 26.9pt vs 31.3pt wide, `0.3\linewidth` 147pt vs 129pt), now linted in figure files (`build_log.lint_figure_text`).
+  Stronger guard if ever needed: every `spork figure` logs its named nodes' positions/sizes, and the build compares the paper and
+  slides logs of the same figure, naming nodes that differ.
+
 ## Fix list from the smoke test (2026-10-21; all DONE 2026-10-21)
 
 Implementation choices: `\sporkCodeRule` keeps exact `\hrule` spacing (`\moveright\@totalleftmargin\hbox{\rule{\linewidth}...}`);
