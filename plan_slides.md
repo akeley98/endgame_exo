@@ -1,8 +1,10 @@
 # Plan: Shared Paper/Slides Build (`code_to_tex` package, Beamer)
 
-Status: design agreed with David (2026-10-21). Phases 1-2 (package: spork_style.tex, listing generator, build driver incl. `--arxiv`) implemented 2026-10-21, 204 tests passing;
-phases 3-4 (amspork3 migration, `beamer_nyc25_test` smoke deck) done; phase 5 reference card at `spork/docs/code_to_tex/REFERENCE_CARD.md`.
-Remaining: open questions and the smoke-test fix list below; phase 6 `--arxiv` exists but is untested on amspork3. See "Implementation notes" at the end.
+Status: design agreed with David (2026-10-21). Phases 1-2 (package: spork_style.tex, listing generator, build driver incl. `--arxiv`) implemented 2026-10-21;
+phases 3-4 (amspork3 migration, `beamer_nyc25_test` smoke deck) done; phase 5 docs: `spork/docs/code_to_tex/REFERENCE_CARD.md` (terse) and `PRIMER.md` (walkthrough).
+Listing filter syntax change and the smoke-test fix list implemented 2026-10-21 (252 tests passing).
+Remaining: the arXiv `\colorbox` switch (open question below); phase 6 `--arxiv` exists but is untested on amspork3. See "Implementation notes" at the end.
+Where this plan's directive/macro details disagree with the package README / REFERENCE_CARD, the package docs are current.
 
 Depends on: nothing in `exo`.
 Requirements source: [plan_slides_human_wishlist.md](plan_slides_human_wishlist.md) (David's wishlist; this plan elaborates it).
@@ -387,7 +389,7 @@ preview/
 
 ## Open questions
 
-* **Listing filter syntax: DECIDED 2026-10-21, not yet implemented.** Requirements (David): filters are distinguished syntactically,
+* **Listing filter syntax: DECIDED and IMPLEMENTED 2026-10-21.** Requirements (David): filters are distinguished syntactically,
   not by recognizing special words; one directive can apply several colors (vertical space matters for human readers, who will write many slides by hand).
   Filters are always the first word after the directive name, comma-joined, no spaces, for every directive
   (`begin cpu[:4],reorder_loops[0]`, `mark split raw_await end`). This removes `RESERVED_LISTING_NAMES`.
@@ -408,7 +410,11 @@ preview/
   marking something red", not "a box". Planned: a switch in `spork_style.tex` that renders the highlights without `\colorbox`
   (alternatives TBD: colored text, underline, frame), turned on by `--arxiv`. Deferred by David until slides are written; alternatives untested.
 
-## Fix list from the smoke test (2026-10-21; not yet done)
+## Fix list from the smoke test (2026-10-21; all DONE 2026-10-21)
+
+Implementation choices: `\sporkCodeRule` keeps exact `\hrule` spacing (`\moveright\@totalleftmargin\hbox{\rule{\linewidth}...}`);
+fonts via opt-in `spork figure` key + redefinable `\sporkFigFont` (9/11pt), `em`-based TikZ defaults now follow the figure font;
+viewer copy names: deck == dir -> `<dir>_slides.pdf`, deck `<dir>_x` -> `<dir>_x.pdf`, else `<dir>_<deck>.pdf`.
 
 1. Viewer copy rule: evince crashes on half-written PDFs and on PDFs with undefined references, so copy only when xelatex produced
    a PDF with **no LaTeX errors and no undefined references** (also refuse on nonzero xelatex exit). Overfull boxes etc. never block (they are what "partial progress" meant).
@@ -418,7 +424,8 @@ preview/
 5. Figure fonts: use `execute at begin picture={\sffamily}` so node `font=\bfseries` stays sans; consider a shared absolute figure/listing font size (`\sporkFigFont`), since body sizes differ between paper (10/11pt) and slides (12pt).
 6. `--figure --png`: crop all steps of a figure to their union bounding box so step-to-step movement is visible.
 7. Viewer copy name doubles when deck name == directory name (`beamer_nyc25_test_beamer_nyc25_test.pdf`); e.g. use `<dir>_<deck>.pdf` only when they differ.
-8. README tips: `overlayarea` for step-varying text heights; `(pic cs:a -| X)` doesn't parse, define a `\coordinate` first.
+8. README tips: `overlayarea` for step-varying text heights; `(pic cs:a -| X)` parses but silently lands at the origin
+   (the whole `a -| X` is taken as the mark name), define a `\coordinate` first.
 
 Decided: `\sporkListing` defaults to `\only` (code grows; matches the old per-version-file slides), `reserve` opt-in;
 frames holding growing listings are recommended top-aligned (`[t]`), since Beamer's default vertical centering moves *all* lines when the listing grows.
