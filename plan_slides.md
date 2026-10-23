@@ -456,7 +456,8 @@ Standalone figures compile in slides mode (see Figures). Tests are pytest inside
   Decided 2026-10-22 (David: extra brace levels are an attractive nuisance): write `_\mathrm{lo}` / `_\mathsf{pre}` / `_\mathtt{..}`,
   which aren't redefined; fontspec maps the math alphabets to the document fonts (fontspec-xetex.sty `\SetMathAlphabet`),
   so the PDF uses the same fonts (verified; sub-pixel metric differences only). amspork3 converted (86 sites);
-  `build_log.lint_script_text` suggests `\math..` for `\text..` directly in a sub/superscript. Multi-word subscripts are not vetted.
+  `build_log.lint_script_text` flags only the compile-breaking unbraced `_\text..` (David: don't lint style preferences;
+  braced `_{\textrm{..}}` is allowed), suggesting `\math..`. Multi-word subscripts are not vetted.
 * **Marks inside TikZ node text land in the wrong place under xelatex** (xdvipdfmx moves node text with a PDF transform that `\pdfsavepos` never sees).
   Probably the real cause of the old `\bugYFix` hack. Put listings in normal text/minipages and overlay a `remember picture` picture. Marks use `\pgfmark` (tikzmark library, `pic cs:`).
   Calibrated defaults: `\sporkMarkXShift` = 0pt, `\sporkMarkYShift` = 0.5ex.
