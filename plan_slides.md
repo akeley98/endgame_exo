@@ -3,6 +3,13 @@
 Status: design agreed with David (2026-10-21). Phases 1-2 (package: spork_style.tex, listing generator, build driver incl. `--arxiv`) implemented 2026-10-21;
 phases 3-4 (amspork3 migration, `beamer_nyc25_test` smoke deck) done; phase 5 docs: `spork/docs/code_to_tex/REFERENCE_CARD.md` (terse) and `PRIMER.md` (walkthrough).
 Listing filter syntax change and the smoke-test fix list implemented 2026-10-21 (252 tests passing).
+2026-10-22: the smoke deck moved into the package (`spork/docs/code_to_tex/beamer_nyc25_test/`) so the package is self-contained
+(its `tex_build.json` check still uses `exocc`; generalizing that is deferred). Decided and implemented 2026-10-22 (318 tests): whole-word matching by
+default with a `chars` match mode (`color X green chars "m"`; grammar `match → mode? quotedString index?`, room for future modes like `regex`),
+and backticks in listing comments as monospace (`` `$` `` = literal dollar; odd backticks in a *shown* comment line is an error;
+a match containing exactly one backtick of a pair is an error, color boundaries inside a backtick region are fine).
+Airlift census (2026-10-22): no runtime references outside the package; only docs/docstrings mention spork paths, and two listing
+tests compare against legacy `spork/docs/nyc25_tex/` output (they skip or drop that comparison if it is absent).
 Remaining: the arXiv `\colorbox` switch (open question below); phase 6 `--arxiv` exists but is untested on amspork3. See "Implementation notes" at the end.
 Where this plan's directive/macro details disagree with the package README / REFERENCE_CARD, the package docs are current.
 
@@ -398,10 +405,11 @@ preview/
   colorDirective → "# TeX: color" filters coloring+
   filters        → filter ("," filter)*          (one word)
   coloring       → colorName match+               (color word is sticky until the next color word)
-  match          → quotedString index?
+  match          → mode? quotedString index?      (2026-10-22: whole-word by default)
+  mode           → "chars"                        (substring match; room for future modes, e.g. regex)
   index          → N ":" I  |  N ":*"            (omitted: exactly 1 match)
   ```
-  Example: `# TeX: color cpu[3:] violet "n" 2:0 "seq" blue "k"`. Remaining tokens are classified by shape (quoted / `N:I` / bare word);
+  Example: `# TeX: color cpu[3:] violet "n" "seq" blue "k" green chars "m" 2:0`. Remaining tokens are classified by shape (quoted / `N:I` / bare word);
   an unknown bare word is an error. Rejected (David optimizes for visual scanning; directives must start where expected):
   `;`-separated clauses with different filters, and trailing `# TeX:` directives on code lines.
   Changing it touches the parser, README, REFERENCE_CARD, test fixtures, and `beamer_nyc25_test/samples.py`.
