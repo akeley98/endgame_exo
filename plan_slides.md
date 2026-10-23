@@ -451,7 +451,12 @@ Standalone figures compile in slides mode (see Figures). Tests are pytest inside
   `latex/spork_style.tex`, `latex/code_to_tex_support.tex`. Tests: `cd spork/docs && python3 -m pytest code_to_tex/tests`. No new dependencies were installed.
 * **standalone.sty patch**: a figure's own preamble line `\newif\ifsporkSlides` (any `\if...` token) made `\input` of the figure fail ("Incomplete \iffalse")
   because of how standalone skips the figure preamble. `spork_style.tex` redefines standalone's internal `\sa@gobble`; this depends on the installed standalone version.
-* **beamerarticle** makes `\textrm` etc. overlay-aware, so unbraced `_\textrm{lo}` inside `\hyperref` arguments stops compiling; write `_{\textrm{lo}}`.
+* **beamerarticle** makes `\textrm \textsf \texttt \textbf \textit ... \color \hyperlink \hypertarget` overlay-aware
+  (beamerbaseoverlay.sty), so `_\textrm{lo}` fails with "Missing { inserted" anywhere in math, not just inside `\hyperref`.
+  Decided 2026-10-22 (David: extra brace levels are an attractive nuisance): write `_\mathrm{lo}` / `_\mathsf{pre}` / `_\mathtt{..}`,
+  which aren't redefined; fontspec maps the math alphabets to the document fonts (fontspec-xetex.sty `\SetMathAlphabet`),
+  so the PDF uses the same fonts (verified; sub-pixel metric differences only). amspork3 converted (86 sites);
+  `build_log.lint_script_text` suggests `\math..` for `\text..` directly in a sub/superscript. Multi-word subscripts are not vetted.
 * **Marks inside TikZ node text land in the wrong place under xelatex** (xdvipdfmx moves node text with a PDF transform that `\pdfsavepos` never sees).
   Probably the real cause of the old `\bugYFix` hack. Put listings in normal text/minipages and overlay a `remember picture` picture. Marks use `\pgfmark` (tikzmark library, `pic cs:`).
   Calibrated defaults: `\sporkMarkXShift` = 0pt, `\sporkMarkYShift` = 0.5ex.
