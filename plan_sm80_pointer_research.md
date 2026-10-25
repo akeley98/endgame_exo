@@ -106,6 +106,50 @@ Exo, per LDSM (all of it is recomputed for every ldmatrix):
      That's the "`Sm90_SmemSwizzle` window encoder with swizzled and unswizzled 32-bit pointer" item in the Category 1 notes.
      Moving ldmatrix's per-lane offset out of `codegen` (the `inline_codegen` → LoopIR-nest idea) is what lets the per-lane part be hoisted like any other loop-invariant value.
 
+## Uniform datapath: what earns a UR register (2026-10-25)
+
+`ptxas` documents none of this, so this is from experiments (nvcc/ptxas 12.3, sm_80, `-O3`).
+Sources: [plan_sm80_pointer_research_uniform_exp.cu](plan_sm80_pointer_research_uniform_exp.cu),
+[..._swizzle_exp.cu](plan_sm80_pointer_research_swizzle_exp.cu), [..._distinct_exp.cu](plan_sm80_pointer_research_distinct_exp.cu).
+Build: `nvcc -O3 -arch=sm_80 -cubin`, then `cuobjdump -sass`, then look at the `#pragma unroll 1` loop body.
+
+**No name magic.** Renaming every `cutlass` to `kutlass` gives byte-identical SASS for the CUTLASS GEMM, both in the PTX (same length, so the manglings stay valid) and from source (`-Dcutlass=kutlass`, so no symbol contains "cutlass").
+So nothing keys on the kernel name here. (The public reports of name-keyed behavior concern other toolchains and FP8, and weren't tested here.)
+
+**Eligibility: ptxas must prove the value warp-uniform, including the control flow around it.**
+
+| loop guarded by | warp index from | stage offset in UR? |
+|---|---|---|
+| nothing | either | yes (`[R+UR4]`) |
+| `if (threadIdx.x < 128)` (always true) | either | **no** |
+| `if (threadIdx.x / 32 < 2)` | either | **no** |
+| `if (warp < 2)` | `threadIdx.x / 32` | **no** |
+| `if (warp < 2)` | `__shfl_sync(~0, threadIdx.x / 32, 0)` | yes |
+| `if (blockIdx.x < 2)` | either | yes |
+
+* Uniform sources: constants, kernel params (`c[0x0][...]`), `blockIdx`, loop counters bounded by those, and the result of `shfl.sync.idx` broadcast.
+* `threadIdx.x / 32` is *not* uniform to ptxas (it can't assume `blockDim.x % 32 == 0`).
+* Any branch on a non-uniform value makes everything inside it ineligible, even if the branch is always taken or actually warp-uniform.
+* The `__shfl_sync` warp index restores it. This is exactly CUTLASS's `canonical_warp_idx_sync()` (`cutlass.h:131`), used in `gemm/kernel/gemm.h:259` (1 `SHFL` in the whole kernel).
+  It's also the `exo_warpid` proposal in [CLAUDE.md](CLAUDE.md), now with evidence.
+* Exo's `if ([[maybe_unused]] int x = threadIdx.x ...; 1)` scoping blocks are not branches, so they're harmless.
+  Real `threadIdx` branches (warp specialization, `cuda_threads` sub-ranges) are what kill uniformity.
+
+**Profitability is heuristic: ptxas uses UR only when it saves vector work.**
+One uniform stage term added to one per-lane base stays a vector `IADD` (no UR, even with a barrier in the loop).
+Added to two or more distinct per-lane bases, ptxas moves the stage offset (and the loop counter) to UR and folds it into `[R + UR + imm]` addressing.
+That matches CUTLASS: `R2`/`R0`/`R214`/`R201` all share `UR4`/`UR5`.
+Per-lane bases that differ only by constants are merged into one base + immediates (`[R21+0x800]`...) with no UR needed.
+
+**Exo's swizzle-after-add hides the uniform term.** `S(lane_addr + stage)` vs `S(lane_addr) + stage`, with stage a multiple of P (`..._swizzle_exp.cu`): ptxas recomputes the swizzle (`SHF` + `LOP3`) every iteration.
+It doesn't know the period identity, so the stage term never becomes a separable uniform add.
+This, not divergence, is why the Exo ring GEMM (which has no real `threadIdx` branches; all its guards are `; 1)` scopes) gets no UR at all in its main loop despite a uniform `((-3 + ks) & 3) * 4096` stage index.
+
+Consequences for Exo, in order:
+1. Emit `S(base + lane_off) + period_multiple` (the hoisting above). This makes the stage/k terms separable, and then eligible for UR.
+2. `exo_warpid` via `__shfl_sync` before any warp-specialized branch. Otherwise everything under that branch loses UR eligibility, even with (1).
+3. Ring index style (`k % RING` vs increment-and-wrap) is secondary: both went to UR when eligible.
+
 ## Additional Exo costs found (not in the original analysis)
 
 * **64-bit generic pointers.** Exo swizzles the 64-bit generic address (`SHF.R.U64`, `LEA.HI.X`) and converts generic→shared on every access (`IADD3 -c[0x0][0x18]`).
