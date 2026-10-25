@@ -6,6 +6,11 @@ Listing filter syntax change and the smoke-test fix list implemented 2026-10-21 
 2026-10-24: figures redesigned around the `sporkfigure` environment with optional shared `fig_<name>_body.tex` bodies; the standalone
 figure design (`--figure`, `--paper`, paperpreview, standalone.sty patch) is removed (332 tests). Sections below that describe
 standalone figures are history; see "Figures" (superseded note) and "Implementation notes".
+2026-10-25: figure font harmonized to 11pt (`\sporkFigFont` 11/13.6 = the paper body size; slides are 12pt) and
+`sporkfigure`'s default scale is 1 everywhere, decided by David because the earlier 9pt font led slide-writing agents to
+compensate with mystery factors (1.2, 12/9 = 1.3333). Use `scale` only for real layout reasons (e.g. fitting a column).
+Old nyc25 deck for reference: figures were wrapped in `\large`/`\Large`/`\LARGE` on a 263mm page, i.e. about 8.8/10.5/12.6pt
+on a 160mm Beamer page.
 2026-10-22: the smoke deck moved into the package (`spork/docs/code_to_tex/beamer_nyc25_test/`) so the package is self-contained
 (its `tex_build.json` check still uses `exocc`; generalizing that is deferred). Decided and implemented 2026-10-22 (318 tests): whole-word matching by
 default with a `chars` match mode (`color X green chars "m"`; grammar `match → mode? quotedString index?`, room for future modes like `regex`),
