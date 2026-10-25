@@ -129,6 +129,10 @@ Verify this in SASS once an attention-style test exists.
    Codegen: one `ldmatrix.x4` per 16×16 base tile, with addresses from the formula above.
    Use `InlinePtxGen` with explicit `{tile.data[q(0)], ..., tile.data[q(3)]}` (`*reinterpret_cast<uint32_t*>(&...)`, as Sm90 does), so the vector order is visible in goldens.
    SMEM: `CudaSmemLinear` and `Sm90_SmemSwizzled(32|64|128)` via per-lane `index_ptr`, as the current `Sm80_ldmatrix` does.
+   Addressing: compute the swizzled per-lane base once per call, then use `[reg + imm]` for period-multiple sub-tile offsets and per-k-chunk XOR variants.
+   Don't recompute `S(base + offset)` per `ldmatrix.x4`.
+   Keep the lane-dependent part separable so Category 1 can hoist it.
+   See [plan_sm80_pointer_research.md](plan_sm80_pointer_research.md) for how CUTLASS does this.
    Types: f16, bf16. (8-bit types need `rt` packing we don't have on sm_80; skip.)
 2. **`Sm80_tk_mma_{AB, ABt, AtB, AtBt}`** (or one instr family parameterized by A/B layout, generated like `gen_Sm90_tk_mma.py`):
    `D[M, N] += A × B` on whole tiles, `M, N, K` multiples of 16.
