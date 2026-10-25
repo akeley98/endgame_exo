@@ -3,6 +3,9 @@
 Status: design agreed with David (2026-10-21). Phases 1-2 (package: spork_style.tex, listing generator, build driver incl. `--arxiv`) implemented 2026-10-21;
 phases 3-4 (amspork3 migration, `beamer_nyc25_test` smoke deck) done; phase 5 docs: `spork/docs/code_to_tex/REFERENCE_CARD.md` (terse) and `PRIMER.md` (walkthrough).
 Listing filter syntax change and the smoke-test fix list implemented 2026-10-21 (252 tests passing).
+2026-10-24: figures redesigned around the `sporkfigure` environment with optional shared `fig_<name>_body.tex` bodies; the standalone
+figure design (`--figure`, `--paper`, paperpreview, standalone.sty patch) is removed (332 tests). Sections below that describe
+standalone figures are history; see "Figures" (superseded note) and "Implementation notes".
 2026-10-22: the smoke deck moved into the package (`spork/docs/code_to_tex/beamer_nyc25_test/`) so the package is self-contained
 (its `tex_build.json` check still uses `exocc`; generalizing that is deferred). Decided and implemented 2026-10-22 (318 tests): whole-word matching by
 default with a `chars` match mode (`color X green chars "m"`; grammar `match → mode? quotedString index?`, room for future modes like `regex`),
@@ -216,7 +219,15 @@ Hard-wired step numbers are accepted for now (no named steps).
 
 ### Figures
 
-A figure file is both standalone-compilable and `\input`-able:
+**SUPERSEDED 2026-10-24** by the `sporkfigure` environment (see the package REFERENCE_CARD "Figures"): figures are drawn in
+`\begin{sporkfigure}[scale=S]` wherever they're used; figures shared by paper/slides or several slides `\input` a raw
+`fig_<name>_body.tex` (David's old nyc25 pattern), and slides add per-slide elements relative to the body's nodes.
+Node names are local to a sporkfigure (stale references error instead of silently binding to another picture's node).
+The standalone design below (and `--figure`, `--paper`, paperpreview wrappers, the standalone.sty patch) was removed.
+Reasons: David preferred seeing figures in context only; per-slide specialization with relative coordinates;
+removing the most fragile piece (the `\sa@gobble` patch). Slides default for `scale` is TBD (`\sporkFigScale`, currently 1).
+
+Original (removed) design: a figure file is both standalone-compilable and `\input`-able:
 
 ```latex
 \documentclass[beamer]{standalone}
@@ -418,7 +429,7 @@ preview/
   marking something red", not "a box". Planned: a switch in `spork_style.tex` that renders the highlights without `\colorbox`
   (alternatives TBD: colored text, underline, frame), turned on by `--arxiv`. Deferred by David until slides are written; alternatives untested.
 
-* **Possible future guard (not approved yet): shared-geometry check.** Verified 2026-10-21 that a `spork figure` figure has identical
+* **Possible future guard (not approved yet): shared-geometry check.** (Still applies to `sporkfigure`, which uses the same fixed font.) Verified 2026-10-21 that a `spork figure` figure has identical
   node coordinates (to 1e-5pt) standalone, in the paper, and in a deck (before `\scalebox`). What breaks this is host-relative sizing
   (`\small` 26.9pt vs 31.3pt wide, `0.3\linewidth` 147pt vs 129pt), now linted in figure files (`build_log.lint_figure_text`).
   Stronger guard if ever needed: every `spork figure` logs its named nodes' positions/sizes, and the build compares the paper and
@@ -449,8 +460,15 @@ Standalone figures compile in slides mode (see Figures). Tests are pytest inside
 
 * Package modules: `listing.py` (API) + `listing_parse.py`, `listing_layout.py`, `listing_render.py`; `build.py` + `build_log.py`, `build_aux.py`, `build_arxiv.py`;
   `latex/spork_style.tex`, `latex/code_to_tex_support.tex`. Tests: `cd spork/docs && python3 -m pytest code_to_tex/tests`. No new dependencies were installed.
-* **standalone.sty patch**: a figure's own preamble line `\newif\ifsporkSlides` (any `\if...` token) made `\input` of the figure fail ("Incomplete \iffalse")
-  because of how standalone skips the figure preamble. `spork_style.tex` redefines standalone's internal `\sa@gobble`; this depends on the installed standalone version.
+* ~~standalone.sty patch~~ (removed 2026-10-24 with the standalone figure design): a figure's own preamble `\newif` broke `\input`;
+  spork_style.tex used to redefine standalone's `\sa@gobble`.
+* **sporkfigure node forgetting** (2026-10-24): stock TikZ node names are global for the rest of the document, so a reference to a
+  node the current picture doesn't define silently binds to another picture's node (and `name prefix` falls back to the unprefixed
+  name). Inside a `sporkfigure`, such references error ("No shape named X is known in this sporkfigure"), and all names it created
+  are undefined at its end. Uses PGF internals (`\pgf@sh@{ns,np,nt,pi,ma,sa}@NAME`, `\tikz@dcl@coord@NAME`, `\pgf@nodecallback`,
+  `\pgf@shape@interpictureshift`; pgf 3.1.x); covered by `test_style.py::test_node_names_are_local`.
+* **`remember picture` overlays don't follow `\scalebox`** under xelatex (same cause as marks in nodes): decorate a figure inside its
+  own `sporkfigure`, never from a separate overlay picture.
 * **beamerarticle** makes `\textrm \textsf \texttt \textbf \textit ... \color \hyperlink \hypertarget` overlay-aware
   (beamerbaseoverlay.sty), so `_\textrm{lo}` fails with "Missing { inserted" anywhere in math, not just inside `\hyperref`.
   Decided 2026-10-22 (David: extra brace levels are an attractive nuisance): write `_\mathrm{lo}` / `_\mathsf{pre}` / `_\mathtt{..}`,
@@ -465,5 +483,5 @@ Standalone figures compile in slides mode (see Figures). Tests are pytest inside
 * TikZ hiding keys (`spork reveal`, `spork slide only`, `spork paper only`) use opacity 0: layout and anchors are kept, but hidden text stays in the PDF text layer.
   Wrapping a whole element in `\sporkSlideOnly`/`\sporkPaperOnly` removes it entirely.
 * Listing lines are one paragraph each (not `\\`-separated), so a listing inside a TikZ node needs `text width` or a minipage.
-* `--png` crops only `--figure` renders; deck/frame/paper pages keep page bounds so placement is visible.
+* `--png` renders whole pages (deck/frame/paper), so placement is visible (`--figure` and its cropping were removed 2026-10-24).
 * `.gitignore` additionally needs `*_paperpreview.tex`, `*.fls`, `*.bbl`, `*.blg`.
