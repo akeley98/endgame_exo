@@ -262,6 +262,14 @@ Optional: a figure declares `\sporkFigMaxWidth{...}`; its standalone build warns
 * Paper: `\sporkListing[version=4]{cpu}`.
 * `prefix=...` option renames tikzmarks when a listing is included twice in one document.
 
+### Slide layout preferences (David, 2026-10-28)
+
+* The bottom of a slide is a danger zone for audience visibility: keep content high, e.g. a figure snug under
+  its bullets rather than spaced down, and prefer annotations near the figure over trailing bullets at the bottom.
+* No jitter between overlay steps. Highlight boxes (`\sporkGreen[only=<n>]{..}` etc.) are `\fboxsep` taller and
+  deeper than plain text, so a TikZ node whose text is highlighted on only some steps needs a fixed
+  `text height`/`text depth` (`fixed text={H}{D}` style in `amspork3/26.tex`; measure the highlighted text).
+
 ### Hyperlinks
 
 * `\sporkPaperLink{label}{text}`: real `\hyperref` in the paper, plain text on slides.
