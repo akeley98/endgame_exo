@@ -497,7 +497,9 @@ Standalone figures compile in slides mode (see Figures). Tests are pytest inside
   Wrapping a whole element in `\sporkSlideOnly`/`\sporkPaperOnly` removes it entirely.
 * Listing lines are one paragraph each (not `\\`-separated), so a listing inside a TikZ node needs `text width` or a minipage.
 * `--png` renders whole pages (deck/frame/paper), so placement is visible (`--figure` and its cropping were removed 2026-10-24).
-  Since 2026-10-28 deck/frame PNGs are named `<job>-<frame label>-<step>.png` from the .aux frame page ranges (`frame<N>` if unlabelled,
-  `-f<N>` added for a label several frames share), paper pages `main-p<NN>.png`; pdftoppm renders into a temp dir first because its own
+  Since 2026-10-28 deck/frame PNGs are named `<job>,<frame label>,<step>.png` from the .aux frame page ranges (`<job>,,f<N>,<step>` if
+  unlabelled, `,f<N>` added for a label several frames share), paper pages `main,p<NN>.png`. `,` separates fields and `%` stands for `/`:
+  neither can occur in a frame label (a comma splits `[label=..]` and `\includeonlyframes`; `%` is a comment) or a job name, so names
+  never collide and a job's cleanup never matches another job's files. pdftoppm renders into a temp dir first because its own
   page-number padding depends on the page count. The build also notes duplicate frame labels (nothing caught a duplicate before).
 * `.gitignore` additionally needs `*_paperpreview.tex`, `*.fls`, `*.bbl`, `*.blg`.
