@@ -493,6 +493,8 @@ Standalone figures compile in slides mode (see Figures). Tests are pytest inside
   Probably the real cause of the old `\bugYFix` hack. Put listings in normal text/minipages and overlay a `remember picture` picture. Marks use `\pgfmark` (tikzmark library, `pic cs:`).
   Calibrated defaults: `\sporkMarkXShift` = 0pt, `\sporkMarkYShift` = 0.5ex.
 * **Beamer pitfall**: in `\begin{frame}{Title}{\small ...}` the braced group becomes the (unshown) frame subtitle, so the content vanishes silently.
+* **Beamer pitfall**: `\begin{frame}[label=a:b]` (unbraced `:`) drops the whole frame silently, even in plain beamer; `label={a:b}` works
+  (also with `--frame a:b`). `build_log.lint_frame_label_text` flags it (2026-10-28).
 * TikZ hiding keys (`spork reveal`, `spork slide only`, `spork paper only`) use opacity 0: layout and anchors are kept, but hidden text stays in the PDF text layer.
   Wrapping a whole element in `\sporkSlideOnly`/`\sporkPaperOnly` removes it entirely.
 * Listing lines are one paragraph each (not `\\`-separated), so a listing inside a TikZ node needs `text width` or a minipage.
