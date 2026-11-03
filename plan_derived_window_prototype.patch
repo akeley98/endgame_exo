@@ -1,0 +1,1759 @@
+diff --git a/src/exo/API.py b/src/exo/API.py
+index f0d7c49e..77fe6ea7 100644
+--- a/src/exo/API.py
++++ b/src/exo/API.py
+@@ -10,6 +10,7 @@ from exo.rewrite.LoopIR_scheduling import SchedulingError
+ 
+ from .API_types import ProcedureBase, ExoType
+ from .core import LoopIR as LoopIR
++from .core.derived_window import desugar_derived_windows
+ from .core.cir import CIR_Wrapper
+ from .core.instr_class import (
+     AtomicityInfo,
+@@ -258,6 +259,7 @@ class Procedure(ProcedureBase, ProcCallGen):
+ 
+         if isinstance(proc, LoopIR.UAST.proc):
+             proc = TypeChecker(proc).get_loopir()
++            proc = desugar_derived_windows(proc)
+             CheckBounds(proc)
+             Check_Aliasing(proc)
+ 
+diff --git a/src/exo/API_scheduling.py b/src/exo/API_scheduling.py
+index 373ac845..cb235ca9 100644
+--- a/src/exo/API_scheduling.py
++++ b/src/exo/API_scheduling.py
+@@ -1877,6 +1877,27 @@ def inline_window(proc, winstmt_cursor):
+     return Procedure(ir, _provenance_eq_Procedure=proc, _forward=fwd)
+ 
+ 
++class OptSpecialWindowA(ArgumentProcessor):
++    def __call__(self, sw, all_args):
++        if sw is not None and not is_subclass_obj(sw, SpecialWindow):
++            self.err("expected a SpecialWindow subclass or None")
++        return sw
++
++
++@sched_op([GapCursorA, NameA, CustomWindowExprA("gap_cursor"), OptSpecialWindowA])
++def insert_window_stmt(proc, gap_cursor, new_name, win_expr, special_window=None):
++    """
++    PROTOTYPE (plan_derived_window.md): insert a window statement
++    `new_name = buf[win_expr] @ special_window` at the gap, with no other
++    changes. Accesses opt in to the window via their `derived` attribute.
++    """
++    buf_name, w_exprs = win_expr
++    ir, fwd = scheduling.DoInsertWindowStmt(
++        gap_cursor._impl, buf_name, w_exprs, new_name, special_window
++    )
++    return Procedure(ir, _provenance_eq_Procedure=proc, _forward=fwd)
++
++
+ @sched_op(
+     [
+         BlockCursorA,
+diff --git a/src/exo/backend/LoopIR_compiler.py b/src/exo/backend/LoopIR_compiler.py
+index d54fd9a2..1e34257b 100644
+--- a/src/exo/backend/LoopIR_compiler.py
++++ b/src/exo/backend/LoopIR_compiler.py
+@@ -63,6 +63,7 @@ from ..spork.loop_modes import LoopMode, Seq, Par, _CodegenPar, CudaTasks
+ from ..spork.barrier_usage import BarrierUsage, BarrierUsageAnalysis, SyncInfo
+ from ..spork import timelines
+ from ..spork.cuda_backend import loopir_lower_cuda, h_snippet_for_cuda
++from ..core.derived_window import unify_derived_windows
+ from ..spork import excut
+ from ..spork.coll_analysis import CollAnalysis
+ 
+@@ -493,7 +494,7 @@ def ext_compile_to_strings(
+ 
+             # This is outside the try/catch since this does its own debug logging.
+             backend = run_backend_checks(p, debug_log)
+-            p = backend.analyzed
++            p = unify_derived_windows(backend.analyzed)
+ 
+             try:
+                 comp = Compiler(
+diff --git a/src/exo/backend/mem_analysis.py b/src/exo/backend/mem_analysis.py
+index 36762961..228d9c49 100644
+--- a/src/exo/backend/mem_analysis.py
++++ b/src/exo/backend/mem_analysis.py
+@@ -206,6 +206,8 @@ class MemoryAnalysis:
+         if isinstance(e, (LoopIR.WindowExpr, LoopIR.Read)):
+             # e.name not translated by window_alias:
+             # we want SpecialWindow if applicable.
++            if isinstance(e, LoopIR.WindowExpr) and e.derived is not None:
++                return self.mem_env[e.derived]
+             return self.mem_env[e.name]
+         else:
+             assert False
+diff --git a/src/exo/backend/prec_analysis.py b/src/exo/backend/prec_analysis.py
+index af86f4db..23f988f6 100644
+--- a/src/exo/backend/prec_analysis.py
++++ b/src/exo/backend/prec_analysis.py
+@@ -151,12 +151,12 @@ class PrecisionAnalysis(LoopIR_Rewrite):
+             if typ.is_numeric():
+                 btyp = self.get_type(e.name).basetype()
+                 typ = self.splice_type(e.type, btyp)
+-            return LoopIR.Read(e.name, e.idx, typ, e.srcinfo)
++            return LoopIR.Read(e.name, e.idx, e.derived, typ, e.srcinfo)
+ 
+         elif isinstance(e, LoopIR.WindowExpr):
+             btyp = self.get_type(e.name).basetype()
+             wtyp = self.splice_type(e.type, btyp)
+-            return LoopIR.WindowExpr(e.name, e.idx, wtyp, e.srcinfo)
++            return LoopIR.WindowExpr(e.name, e.idx, e.derived, wtyp, e.srcinfo)
+ 
+         elif isinstance(e, LoopIR.USub):
+             arg = self.apply_e(e.arg)
+diff --git a/src/exo/backend/win_analysis.py b/src/exo/backend/win_analysis.py
+index 4b3ad586..296a4342 100644
+--- a/src/exo/backend/win_analysis.py
++++ b/src/exo/backend/win_analysis.py
+@@ -24,7 +24,7 @@ class WindowAnalysis(LoopIR_Rewrite):
+                     shape, True, a.type.basetype(), a.type.get_ring_guarded_by()
+                 )
+                 win_typ = T.Window(a.type, as_tens, a.name, idx)
+-                return LoopIR.WindowExpr(a.name, idx, win_typ, a.srcinfo)
++                return LoopIR.WindowExpr(a.name, idx, None, win_typ, a.srcinfo)
+ 
+             def promote_arg(a, sa):
+                 if sa.type.is_win() and not a.type.is_win():
+diff --git a/src/exo/core/LoopIR.py b/src/exo/core/LoopIR.py
+index 7b4aaf18..0bd16390 100644
+--- a/src/exo/core/LoopIR.py
++++ b/src/exo/core/LoopIR.py
+@@ -71,9 +71,9 @@ module LoopIR {
+                srcinfo srcinfo )
+ 
+            -- name[*idx] = rhs
+-    stmt = Assign( sym name, type type, expr* idx, expr rhs )
++    stmt = Assign( sym name, type type, expr* idx, expr rhs, sym? derived )
+            -- name[*idx] += rhs  ("Reduce" is hard-wired in Exo to mean addition)
+-         | Reduce( sym name, type type, expr* idx, expr rhs )
++         | Reduce( sym name, type type, expr* idx, expr rhs, sym? derived )
+            -- CPU-only stmt for setting up accelerator e.g. vsetvli ; no GPU equivalent
+          | WriteConfig( config config, string field, expr rhs )
+            -- No-op
+@@ -108,13 +108,16 @@ module LoopIR {
+          | WindowStmt( sym name, expr rhs, special_window? special_window )
+          attributes( srcinfo srcinfo )  -- common to all stmt constructors
+ 
+-    expr = Read( sym name, expr* idx )
++    expr = Read( sym name, expr* idx, sym? derived )
+          | Const( object val )
+          | USub( expr arg )  -- i.e.  -(...)
+          | BinOp( binop op, expr lhs, expr rhs )
+          | Extern( extern f, expr* args )
+          | BarrierExpr( sym name, w_access* idx ) -- Should we replace with WindowExpr alone?
+-         | WindowExpr( sym name, w_access* idx )
++         -- derived: optional WindowStmt name; codegen unifies this
++         -- window expression of the underlying tensor `name` against
++         -- the WindowStmt (see unify_derived.py). Rewrites pass it through.
++         | WindowExpr( sym name, w_access* idx, sym? derived )
+          | StrideExpr( sym name, int dim )
+          | ReadConfig( config config, string field )
+          -- Only used in GPU codegen hack: `(arg + c_consumption) % ring_depth`
+@@ -2061,6 +2064,8 @@ class Alpha_Rename(LoopIR_Rewrite):
+     def map_s(self, s):
+         if isinstance(s, (LoopIR.Assign, LoopIR.Reduce)):
+             s2 = super().map_s(s)
++            if s.derived is not None and (new_derived := self.env.get(s.derived)):
++                s2 = [((s2 and s2[0]) or s).update(derived=new_derived)]
+             if new_name := self.env.get(s.name):
+                 return [((s2 and s2[0]) or s).update(name=new_name)]
+             else:
+@@ -2112,6 +2117,12 @@ class Alpha_Rename(LoopIR_Rewrite):
+             e, (LoopIR.Read, LoopIR.BarrierExpr, LoopIR.WindowExpr, LoopIR.StrideExpr)
+         ):
+             e2 = super().map_e(e)
++            if (
++                isinstance(e, (LoopIR.WindowExpr, LoopIR.Read))
++                and e.derived is not None
++            ):
++                if new_derived := self.env.get(e.derived):
++                    e2 = (e2 or e).update(derived=new_derived)
+             if new_name := self.env.get(e.name):
+                 return (e2 or e).update(name=new_name)
+             else:
+diff --git a/src/exo/core/LoopIR_pprint.py b/src/exo/core/LoopIR_pprint.py
+index 4aa6f302..af067096 100644
+--- a/src/exo/core/LoopIR_pprint.py
++++ b/src/exo/core/LoopIR_pprint.py
+@@ -535,6 +535,8 @@ def _print_stmt(stmt, env: PrintEnv, indent: str) -> list[str]:
+         idx = f"[{', '.join(idx)}]" if idx else ""
+ 
+         rhs = _print_expr(stmt.rhs, env)
++        if stmt.derived is not None:
++            idx += f" @ derived({env.get_name(stmt.derived)})"
+ 
+         return [f"{indent}{lhs}{idx} {op} {rhs}"]
+ 
+@@ -620,6 +622,8 @@ def _print_expr_impl(e, env: PrintEnv, prec: int) -> str:
+     if isinstance(e, LoopIR.Read):
+         name = env.get_name(e.name)
+         idx = f"[{', '.join(_print_expr(i, env) for i in e.idx)}]" if e.idx else ""
++        if e.derived is not None:
++            return f"({name}{idx} @ derived({env.get_name(e.derived)}))"
+         return f"{name}{idx}"
+ 
+     elif isinstance(e, LoopIR.Const):
+@@ -655,7 +659,10 @@ def _print_expr_impl(e, env: PrintEnv, prec: int) -> str:
+ 
+     elif isinstance(e, LoopIR.WindowExpr):
+         name = env.get_name(e.name)
+-        return f"{name}[{', '.join([_print_w_access(w, env) for w in e.idx])}]"
++        text = f"{name}[{', '.join([_print_w_access(w, env) for w in e.idx])}]"
++        if e.derived is not None:
++            text += f" @ derived({env.get_name(e.derived)})"
++        return text
+ 
+     elif isinstance(e, LoopIR.StrideExpr):
+         return f"stride({env.get_name(e.name)}, {e.dim})"
+diff --git a/src/exo/core/instr_info.py b/src/exo/core/instr_info.py
+index c67ca52a..0c7f6ec7 100644
+--- a/src/exo/core/instr_info.py
++++ b/src/exo/core/instr_info.py
+@@ -29,6 +29,17 @@ class AccessInfo:
+     # UNSTABLE: for experiments on figuring out how to model TMA's
+     # zero-pad behavior (reading GMEM) and implied predication (writing GMEM)
+     # when out-of-bounds coordinates are given.
++    #
++    # UNSOUND HACK: boundscheck simply discards all effects on this parameter
++    # (see exempt_names in frontend/boundscheck.py), so out-of-bounds accesses
++    # through it are never diagnosed. The instr's sequential semantics (its
++    # body) still describe ordinary reads/writes at those coordinates, which
++    # are undefined behavior in Exo; the zero-fill (loads) and dropped writes
++    # (stores) the hardware actually performs are not modeled anywhere.
++    # Schedules rely on this together with unsafe_remove_if to drop tail
++    # guards around TMA (e.g. tk_gemm_util), so analyses (effects, sync_check)
++    # reason about an approximation of what the hardware does for tail tiles.
++    # TODO: model the out-of-bounds behavior soundly.
+     allow_out_of_bounds: bool = False
+ 
+     # For warp shuffles and TMA: identifies that the first
+diff --git a/src/exo/frontend/boundscheck.py b/src/exo/frontend/boundscheck.py
+index 600d2961..93019d36 100644
+--- a/src/exo/frontend/boundscheck.py
++++ b/src/exo/frontend/boundscheck.py
+@@ -1065,6 +1065,7 @@ class CheckBounds:
+                             self.check_call_shape_eqv(arg_shape, sig_shape, arg)
+ 
+                         # Prep for allow_out_of_bounds exception.
++                        # UNSOUND HACK: see AccessInfo.allow_out_of_bounds.
+                         if access_info:
+                             nm = sig.name  # Sym type, use str for dict lookup.
+                             if access_info[str(nm)].allow_out_of_bounds:
+diff --git a/src/exo/frontend/parse_fragment.py b/src/exo/frontend/parse_fragment.py
+index ab6dbdbd..f73feb98 100644
+--- a/src/exo/frontend/parse_fragment.py
++++ b/src/exo/frontend/parse_fragment.py
+@@ -227,7 +227,7 @@ class ParseFragment:
+                     f"{pat.name} not found in the " + "current environment"
+                 )
+             idx = [self.parse_e(i) for i in pat.idx]
+-            return LoopIR.Read(nm, idx, self.env[nm], self.srcinfo)
++            return LoopIR.Read(nm, idx, None, self.env[nm], self.srcinfo)
+         elif isinstance(pat, PAST.BinOp):
+             lhs = self.parse_e(pat.lhs)
+             rhs = self.parse_e(pat.rhs)
+diff --git a/src/exo/frontend/typecheck.py b/src/exo/frontend/typecheck.py
+index d75f34f9..8ae9270b 100644
+--- a/src/exo/frontend/typecheck.py
++++ b/src/exo/frontend/typecheck.py
+@@ -5,6 +5,7 @@ from ..core.prelude import Sym
+ from ..core.size_annotation import NoSizeAnnotation
+ from ..spork.base_with_context import BaseWithContext
+ 
++from ..core.derived_window import check_no_config_reads
+ from ..core.LoopIR import (
+     T,
+     UAST,
+@@ -231,6 +232,7 @@ class TypeChecker:
+                 return []
+             elif isinstance(rhs.type, T.Window):
+                 assert isinstance(rhs, LoopIR.WindowExpr)
++                check_no_config_reads(rhs, lambda msg: self.err(stmt, msg))
+                 self.env[stmt.name] = rhs.type
+                 return [
+                     LoopIR.WindowStmt(
+@@ -255,7 +257,7 @@ class TypeChecker:
+             assert typ.is_real_scalar() or typ is T.err
+ 
+             IRnode = LoopIR.Assign if isinstance(stmt, UAST.Assign) else LoopIR.Reduce
+-            return [IRnode(stmt.name, typ, idx, rhs, stmt.srcinfo)]
++            return [IRnode(stmt.name, typ, idx, rhs, None, stmt.srcinfo)]
+ 
+         elif isinstance(stmt, UAST.WriteConfig):
+             # Check that field is in config
+@@ -460,7 +462,7 @@ class TypeChecker:
+             # otherwise, we have a normal access
+             else:
+                 idx, typ = self.check_access(e, e.name, e.idx, lvalue=False)
+-                return LoopIR.Read(e.name, idx, typ, e.srcinfo)
++                return LoopIR.Read(e.name, idx, None, typ, e.srcinfo)
+ 
+         elif isinstance(e, UAST.BarrierExpr):
+             in_typ = self.env[e.name]
+@@ -489,7 +491,7 @@ class TypeChecker:
+                     f"cannot perform windowing on non-tensor, "
+                     f"non-window type {in_typ} defined by {e}",
+                 )
+-                return LoopIR.WindowExpr(e.name, [], T.err, e.srcinfo)
++                return LoopIR.WindowExpr(e.name, [], None, T.err, e.srcinfo)
+ 
+             if e.special_window is not None:
+                 # UAST has the optional special window as part of WindowExpr as
+@@ -502,7 +504,7 @@ class TypeChecker:
+                         f"Can only create SpecialWindow as part of "
+                         f"WindowStmt (W = t[idx...] @ SpecialWindow)",
+                     )
+-                    return LoopIR.WindowExpr(e.name, [], T.err, e.srcinfo)
++                    return LoopIR.WindowExpr(e.name, [], None, T.err, e.srcinfo)
+ 
+             in_shape = in_typ.shape()
+             if len(in_shape) != len(e.idx):
+@@ -511,11 +513,11 @@ class TypeChecker:
+                     f"expected {len(in_shape)} indices for window "
+                     f"but got {len(e.idx)}",
+                 )
+-                return LoopIR.WindowExpr(e.name, [], T.err, e.srcinfo)
++                return LoopIR.WindowExpr(e.name, [], None, T.err, e.srcinfo)
+ 
+             idx = [self.check_w_access(w, t) for w, t in zip(e.idx, in_shape)]
+             w_typ = create_window_type(e.name, in_typ, idx)
+-            return LoopIR.WindowExpr(e.name, idx, w_typ, e.srcinfo)
++            return LoopIR.WindowExpr(e.name, idx, None, w_typ, e.srcinfo)
+ 
+         elif isinstance(e, UAST.Const):
+             if isinstance(e.val, BaseWithContext):
+diff --git a/src/exo/platforms/Sm90/Sm90_tma_impl.py b/src/exo/platforms/Sm90/Sm90_tma_impl.py
+index a974047e..2d2e5e3b 100644
+--- a/src/exo/platforms/Sm90/Sm90_tma_impl.py
++++ b/src/exo/platforms/Sm90/Sm90_tma_impl.py
+@@ -155,7 +155,9 @@ def make_basic_tma(n_dims: int, to_gmem: bool, is_multicast: bool, is_reduce: bo
+             smem.mem = Sm90_get_mma_smem(swizzle)
+ 
+             gmem.mem = Sm90_tensorMap(swizzle, *smem_box)
+-            gmem.allow_out_of_bounds = True  # GMEM special case
++            # GMEM special case. UNSOUND HACK: out-of-bounds TMA coordinates
++            # are not bounds checked; see AccessInfo.allow_out_of_bounds.
++            gmem.allow_out_of_bounds = True
+ 
+             if to_gmem:
+                 self.instr_tl = tma_to_gmem_async_instr
+diff --git a/src/exo/rewrite/LoopIR_scheduling.py b/src/exo/rewrite/LoopIR_scheduling.py
+index d6fa064d..8d159881 100644
+--- a/src/exo/rewrite/LoopIR_scheduling.py
++++ b/src/exo/rewrite/LoopIR_scheduling.py
+@@ -37,6 +37,8 @@ from .new_eff import (
+ from .range_analysis import IndexRangeEnvironment, IndexRange, index_range_analysis
+ 
+ from ..core.prelude import *
++from ..core.LoopIR import create_window_type
++from ..core.derived_window import desugar_derived_windows_stmts, check_no_config_reads
+ from ..core.proc_eqv import get_strictest_eqv_proc
+ import exo.core.internal_cursors as ic
+ import exo.API as api
+@@ -472,7 +474,7 @@ def DoShiftLoop(loop_c, new_lo):
+     # all uses of the loop iteration in the second body need
+     # to be offset by (`lo` - `new_lo``)
+     loop_iter = s.iter
+-    iter_node = LoopIR.Read(loop_iter, [], T.index, s.srcinfo)
++    iter_node = LoopIR.Read(loop_iter, [], None, T.index, s.srcinfo)
+     iter_offset = LoopIR.BinOp("-", s.lo, new_lo, T.index, s.srcinfo)
+     new_iter = LoopIR.BinOp("+", iter_node, iter_offset, T.index, s.srcinfo)
+ 
+@@ -517,7 +519,7 @@ def DoProductLoop(outer_loop_c, new_name):
+ 
+     # Construct replacement expressions
+     srcinfo = inner_hi.srcinfo
+-    var = LoopIR.Read(new_var, [], T.index, srcinfo)
++    var = LoopIR.Read(new_var, [], None, T.index, srcinfo)
+     outer_expr = LoopIR.BinOp("/", var, inner_hi, T.index, srcinfo)
+     inner_expr = LoopIR.BinOp("%", var, inner_hi, T.index, srcinfo)
+ 
+@@ -613,7 +615,7 @@ def DoSplitWrite(sc):
+         raise SchedulingError("Expected the rhs of the statement to be an addition.")
+ 
+     s0 = s.update(rhs=s.rhs.lhs)
+-    s1 = LoopIR.Reduce(s.name, s.type, s.idx, s.rhs.rhs, s.srcinfo)
++    s1 = LoopIR.Reduce(s.name, s.type, s.idx, s.rhs.rhs, s.derived, s.srcinfo)
+     ir, fwd = sc._replace([s0, s1])
+     return ir, fwd
+ 
+@@ -639,6 +641,7 @@ def DoFoldIntoReduce(assign):
+         assign_s.type,
+         assign_s.idx,
+         assign_s.rhs.rhs,
++        assign_s.derived,
+         assign_s.srcinfo,
+     )
+     return assign._replace([reduce_stmt])
+@@ -687,7 +690,7 @@ def DoDivideWithRecompute(
+     Check_IsIdempotent(proc, loop.body)
+ 
+     def rd(i):
+-        return LoopIR.Read(i, [], T.index, srcinfo)
++        return LoopIR.Read(i, [], None, T.index, srcinfo)
+ 
+     def cnst(intval):
+         return LoopIR.Const(intval, T.int, srcinfo)
+@@ -770,7 +773,7 @@ def DoDivideLoop(
+ 
+     def substitute(srcinfo):
+         cnst = lambda x: LoopIR.Const(x, T.int, srcinfo)
+-        rd = lambda x: LoopIR.Read(x, [], T.index, srcinfo)
++        rd = lambda x: LoopIR.Read(x, [], None, T.index, srcinfo)
+         op = lambda op, lhs, rhs: LoopIR.BinOp(op, lhs, rhs, T.index, srcinfo)
+ 
+         return op("+", op("*", cnst(quot), rd(outer_i)), rd(inner_i))
+@@ -786,7 +789,7 @@ def DoDivideLoop(
+         return LoopIR.Const(intval, T.int, srcinfo)
+ 
+     def rd(i):
+-        return LoopIR.Read(i, [], T.index, srcinfo)
++        return LoopIR.Read(i, [], None, T.index, srcinfo)
+ 
+     def ceildiv(lhs, rhs):
+         assert isinstance(rhs, LoopIR.Const) and rhs.val > 0
+@@ -918,7 +921,7 @@ def DoInline(call):
+         if isinstance(a, LoopIR.WindowExpr):
+             stmt = LoopIR.WindowStmt(nm, a, None, a.srcinfo)
+             win_binds.append(stmt)
+-            return LoopIR.Read(nm, [], a.type, a.srcinfo)
++            return LoopIR.Read(nm, [], None, a.type, a.srcinfo)
+         return a
+ 
+     # first, set-up a binding from sub-proc arguments
+@@ -935,6 +938,8 @@ def DoInline(call):
+     # whenever we copy code we need to alpha-rename for safety
+     # the code to splice in at this point
+     new_body = Alpha_Rename(win_binds + body).result()
++    # PROTOTYPE (plan_derived_window.md): nothing may index a WindowStmt lhs.
++    new_body = desugar_derived_windows_stmts(new_body)
+ 
+     ir, fwd = call._replace(new_body)
+     return ir, fwd
+@@ -1057,95 +1062,65 @@ def DoCallSwap(call_cursor, new_subproc):
+ 
+ 
+ def DoInlineWindow(window_cursor):
++    # PROTOTYPE (plan_derived_window.md): after desugar_derived_windows,
++    # nothing indexes the WindowStmt lhs; uses are WindowExpr of the
++    # underlying tensor with derived=lhs. Delete the WindowStmt and redirect
++    # derived to whatever the WindowStmt rhs was itself derived from.
+     window_s = window_cursor._node
+     assert isinstance(window_s, LoopIR.WindowStmt)
++    root = window_s.rhs.type.src_buf
++    rest = get_rest_of_block(window_cursor)
+ 
+     ir, fwd = window_cursor._delete()
+ 
+-    def calc_idx(idxs):
+-        win_idx = window_s.rhs.idx
+-        idxs = idxs.copy()  # make function non-destructive to input
+-        assert len(idxs) == sum([isinstance(w, LoopIR.Interval) for w in win_idx])
++    def mk_derived(c):
++        if c._node.derived == window_s.name:
++            return {"derived": window_s.rhs.derived}
+ 
+-        def add(x, y):
+-            return LoopIR.BinOp("+", x, y, T.index, x.srcinfo)
++    for c in rest:
++        ir, fwd = _replace_reads(ir, fwd, c, root, mk_derived)
++        ir, fwd = _replace_writes(ir, fwd, c, root, mk_derived)
+ 
+-        if len(idxs) > 0 and isinstance(idxs[0], LoopIR.w_access):
+-
+-            def map_w(w):
+-                if isinstance(w, LoopIR.Point):
+-                    return w
+-                # i is from the windowing expression we're substituting into
+-                i = idxs.pop(0)
+-                if isinstance(i, LoopIR.Point):
+-                    return LoopIR.Point(add(i.pt, w.lo), i.srcinfo)
+-                else:
+-                    return LoopIR.Interval(add(i.lo, w.lo), add(i.hi, w.lo), i.srcinfo)
+-
+-        else:
+-
+-            def map_w(w):
+-                return w.pt if isinstance(w, LoopIR.Point) else add(idxs.pop(0), w.lo)
++    return ir, fwd
+ 
+-        return [map_w(w) for w in win_idx]
+ 
+-    # used to offset the stride in order to account for
+-    # dimensions hidden due to window-point accesses
+-    def calc_dim(dim):
+-        assert dim < len(
+-            [w for w in window_s.rhs.idx if isinstance(w, LoopIR.Interval)]
++def DoInsertWindowStmt(gap_cursor, buf_name, w_exprs, new_name, special_window):
++    """PROTOTYPE (plan_derived_window.md): insert `new_name = buf[w_exprs] @ SW`
++    with no other changes. Uses opt in later via WindowExpr.derived."""
++    anchor = gap_cursor.anchor()
++    for name, typ, mem in extract_env(anchor):
++        if str(name) == buf_name:
++            break
++    else:
++        raise SchedulingError(f"{buf_name} not found (must be a tensor)")
++    if isinstance(typ, T.Window):
++        raise SchedulingError(f"{buf_name}: windows of windows not prototyped")
++    if special_window is not None:
++        if not issubclass(special_window, SpecialWindow):
++            raise SchedulingError(f"{special_window} is not a SpecialWindow")
++        if not issubclass(mem, special_window.source_memory_type()):
++            raise SchedulingError(
++                f"{special_window.name()} requires {buf_name} in "
++                f"{special_window.source_memory_type().name()}, not {mem.name()}"
++            )
++    srcinfo = anchor._node.srcinfo
++    idx = [
++        (
++            LoopIR.Interval(w[0], w[1], srcinfo)
++            if isinstance(w, tuple)
++            else LoopIR.Point(w, srcinfo)
+         )
++        for w in w_exprs
++    ]
++    w_typ = create_window_type(name, typ, idx)
++    rhs = LoopIR.WindowExpr(name, idx, None, w_typ, srcinfo)
+ 
+-        # Because our goal here is to offset `dim` in the original
+-        # call argument to the point indexing to the windowing expression,
+-        # new_dim should essentially be:
+-        # `dim` + "number of LoopIR.Points in the windowing expression before the `dim` number of LoopIR.Interval"
+-        new_dim = 0
+-        for w in window_s.rhs.idx:
+-            if isinstance(w, LoopIR.Interval):
+-                dim -= 1
+-            if dim == -1:
+-                return new_dim
+-            new_dim += 1
+-
+-    def mk_read(c):
+-        rd = c._node
+-        buf_name = window_s.rhs.name
+-
+-        if isinstance(rd, LoopIR.WindowExpr):
+-            new_idxs = calc_idx(rd.idx)
+-            old_typ = window_s.rhs.type
+-            new_typ = old_typ.update(src_buf=buf_name, idx=new_idxs)
+-            return rd.update(name=buf_name, idx=new_idxs, type=new_typ)
+-        elif isinstance(rd, LoopIR.Read):
+-            if rd.idx:
+-                new_idxs = calc_idx(rd.idx)
+-                return rd.update(name=buf_name, idx=new_idxs)
+-            else:
+-                assert isinstance(c.parent()._node, LoopIR.Call)
+-                return window_s.rhs
+-
+-    def mk_stride_expr(c):
+-        e = c._node
+-        dim = calc_dim(e.dim)
+-        buf_name = window_s.rhs.name
+-        return {"name": buf_name, "dim": dim}
+-
+-    def mk_write(c):
+-        s = c._node
+-        idxs = calc_idx(s.idx)
+-        return {"name": window_s.rhs.name, "idx": idxs}
+-
+-    for c in get_rest_of_block(window_cursor):
+-        ir, fwd = _replace_reads(
+-            ir, fwd, c, window_s.name, mk_read, only_replace_attrs=False
+-        )
+-        ir, fwd = _replace_pats(
+-            ir, fwd, c, f"stride({repr(window_s.name)}, _)", mk_stride_expr
+-        )
+-        ir, fwd = _replace_writes(ir, fwd, c, window_s.name, mk_write)
++    def err(msg):
++        raise SchedulingError(msg)
+ 
+-    return ir, fwd
++    check_no_config_reads(rhs, err)
++    stmt = LoopIR.WindowStmt(Sym(new_name), rhs, special_window, srcinfo)
++    return gap_cursor._insert([stmt])
+ 
+ 
+ def DoConfigWrite(stmt_cursor, config, field, expr, before=False):
+@@ -1265,10 +1240,12 @@ def DoBindExpr(new_name, expr_cursors):
+ 
+     new_name = Sym(new_name)
+     alloc_s = LoopIR.Alloc(new_name, expr.type.basetype(), DRAM, expr.srcinfo)
+-    assign_s = LoopIR.Assign(new_name, expr.type.basetype(), [], expr, expr.srcinfo)
++    assign_s = LoopIR.Assign(
++        new_name, expr.type.basetype(), [], expr, None, expr.srcinfo
++    )
+     ir, fwd = init_s.before()._insert([alloc_s, assign_s])
+ 
+-    new_read = LoopIR.Read(new_name, [], expr.type, expr.srcinfo)
++    new_read = LoopIR.Read(new_name, [], None, expr.type, expr.srcinfo)
+     first_write_c = None
+     for c in get_rest_of_block(init_s, inclusive=True):
+         for block in match_pattern(c, "_ = _") + match_pattern(c, "_ += _"):
+@@ -1560,10 +1537,7 @@ def DoLiftConstant(assign_c, loop_c):
+ 
+     # insert new scaled assign statement after loop
+     new_assign_buffer_read = LoopIR.Read(
+-        assign_s.name,
+-        assign_s.idx,
+-        assign_s.type,
+-        assign_s.srcinfo,
++        assign_s.name, assign_s.idx, None, assign_s.type, assign_s.srcinfo
+     )
+     new_assign_rhs = LoopIR.BinOp(
+         "*",
+@@ -2119,7 +2093,10 @@ class DoLiftAlloc(Cursor_Rewrite):
+             if s.name is self.alloc_sym:
+                 assert self.access_idxs is not None
+                 idx = self.idx_mode(
+-                    [LoopIR.Read(i, [], T.index, s.srcinfo) for i in self.access_idxs],
++                    [
++                        LoopIR.Read(i, [], None, T.index, s.srcinfo)
++                        for i in self.access_idxs
++                    ],
+                     s.idx,
+                 )
+                 rhs = self.apply_e(s.rhs)
+@@ -2146,17 +2123,22 @@ class DoLiftAlloc(Cursor_Rewrite):
+             # if self._in_call_arg:
+             if e.type.is_real_scalar():
+                 idx = self.idx_mode(
+-                    [LoopIR.Read(i, [], T.index, e.srcinfo) for i in self.access_idxs],
++                    [
++                        LoopIR.Read(i, [], None, T.index, e.srcinfo)
++                        for i in self.access_idxs
++                    ],
+                     e.idx,
+                 )
+-                return LoopIR.Read(e.name, idx, e.type, e.srcinfo)
++                return LoopIR.Read(e.name, idx, e.derived, e.type, e.srcinfo)
+             else:
+                 assert self._in_call_arg
+                 assert len(e.idx) == 0
+                 # then we need to replace this read with a
+                 # windowing expression
+                 access = [
+-                    LoopIR.Point(LoopIR.Read(i, [], T.index, e.srcinfo), e.srcinfo)
++                    LoopIR.Point(
++                        LoopIR.Read(i, [], None, T.index, e.srcinfo), e.srcinfo
++                    )
+                     for i in self.access_idxs
+                 ]
+                 orig = [
+@@ -2168,7 +2150,7 @@ class DoLiftAlloc(Cursor_Rewrite):
+                     e.type.as_tensor if isinstance(e.type, T.Window) else e.type
+                 )
+                 win_typ = T.Window(self.alloc_type, tensor_type, e.name, idx)
+-                return LoopIR.WindowExpr(e.name, idx, win_typ, e.srcinfo)
++                return LoopIR.WindowExpr(e.name, idx, None, win_typ, e.srcinfo)
+ 
+         if isinstance(e, LoopIR.WindowExpr) and e.name == self.alloc_sym:
+             assert self.access_idxs is not None
+@@ -2178,13 +2160,15 @@ class DoLiftAlloc(Cursor_Rewrite):
+ 
+             idx = self.idx_mode(
+                 [
+-                    LoopIR.Point(LoopIR.Read(i, [], T.index, e.srcinfo), e.srcinfo)
++                    LoopIR.Point(
++                        LoopIR.Read(i, [], None, T.index, e.srcinfo), e.srcinfo
++                    )
+                     for i in self.access_idxs
+                 ],
+                 e.idx,
+             )
+             win_typ = T.Window(self.alloc_type, e.type.as_tensor, e.name, idx)
+-            return LoopIR.WindowExpr(e.name, idx, win_typ, e.srcinfo)
++            return LoopIR.WindowExpr(e.name, idx, e.derived, win_typ, e.srcinfo)
+ 
+         # fall-through
+         return super().map_e(e)
+@@ -2474,7 +2458,9 @@ def DoFissionAfterSimple(stmt_cursor, n_lifts, unsafe_disable_checks):
+             def wrapper(body):
+                 # Rename the loop iter to a new Sym.
+                 new_iter = Sym(str(par_s.iter))
+-                bind = {par_s.iter: LoopIR.Read(new_iter, [], T.index, par_s.srcinfo)}
++                bind = {
++                    par_s.iter: LoopIR.Read(new_iter, [], None, T.index, par_s.srcinfo)
++                }
+                 new_body = SubstArgs(body, bind).result()
+                 return par_s.update(body=new_body, iter=new_iter)
+ 
+@@ -2717,7 +2703,7 @@ def DoFuseLoop(f_cursor, s_cursor, unsafe_disable_check=False):
+     Check_ExprEqvInContext(proc, loop1.hi, [loop1], loop2.hi, [loop2])
+ 
+     def mk_read(e):
+-        return LoopIR.Read(loop1.iter, [], T.index, loop1.srcinfo)
++        return LoopIR.Read(loop1.iter, [], None, T.index, loop1.srcinfo)
+ 
+     ir, fwd = proc, lambda x: x
+     ir, fwd = _replace_reads(
+@@ -2729,7 +2715,7 @@ def DoFuseLoop(f_cursor, s_cursor, unsafe_disable_check=False):
+     fwd = _compose(fwdDel, fwd)
+ 
+     if not unsafe_disable_check:
+-        x = LoopIR.Read(loop1.iter, [], T.index, loop1.srcinfo)
++        x = LoopIR.Read(loop1.iter, [], None, T.index, loop1.srcinfo)
+         y = loop2.iter
+         body1 = loop1.body
+         body2 = SubstArgs(loop2.body, {y: x}).result()
+@@ -2781,7 +2767,7 @@ def DoAddLoop(stmt_cursor, var, hi, guard, unsafe_disable_check):
+ 
+     def wrapper(body):
+         if guard:
+-            rdsym = LoopIR.Read(sym, [], T.index, s.srcinfo)
++            rdsym = LoopIR.Read(sym, [], None, T.index, s.srcinfo)
+             zero = LoopIR.Const(0, T.int, s.srcinfo)
+             cond = LoopIR.BinOp("==", rdsym, zero, T.bool, s.srcinfo)
+             body = [LoopIR.If(cond, body, [], s.srcinfo)]
+@@ -2977,7 +2963,7 @@ def DoInsertNoopCall(gap, proc, args):
+ 
+         as_tensor = T.Tensor(win_shape, True, typ.basetype(), typ.get_ring_guarded_by())
+         w_typ = T.Window(typ, as_tensor, name, idxs)
+-        return LoopIR.WindowExpr(name, idxs, w_typ, srcinfo)
++        return LoopIR.WindowExpr(name, idxs, None, w_typ, srcinfo)
+ 
+     args = [process_slice(arg) for arg in args]
+     call_stmt = LoopIR.Call(proc, args, None, srcinfo)
+@@ -3025,7 +3011,7 @@ def DoExtractSubproc(block, subproc_name, include_asserts):
+         while not isinstance(c._node, LoopIR.proc):
+             s = c._node
+             if isinstance(s, LoopIR.For) and c.is_ancestor_of(stmt_c):
+-                iter_read = LoopIR.Read(s.iter, [], T.index, s.srcinfo)
++                iter_read = LoopIR.Read(s.iter, [], None, T.index, s.srcinfo)
+                 preds.append(LoopIR.BinOp("<=", s.lo, iter_read, T.bool, s.srcinfo))
+                 preds.append(LoopIR.BinOp("<", iter_read, s.hi, T.bool, s.srcinfo))
+             elif isinstance(s, LoopIR.If):
+@@ -3064,7 +3050,7 @@ def DoExtractSubproc(block, subproc_name, include_asserts):
+         fnargs = []
+         for sym, typ, mem in sym_env:
+             if sym in body_symbols:
+-                args.append(LoopIR.Read(sym, [], typ, info))
++                args.append(LoopIR.Read(sym, [], None, typ, info))
+                 fnargs.append(LoopIR.fnarg(sym, typ, mem, info))
+ 
+         # Filter the predicates we have for ones that use the symbols of the subproc
+@@ -3356,7 +3342,7 @@ class _DoNormalize(Cursor_Rewrite):
+                 return LoopIR.BinOp(
+                     "*",
+                     LoopIR.Const(coeff, T.int, e_context.srcinfo),
+-                    LoopIR.Read(key, [], e_context.type, e_context.srcinfo),
++                    LoopIR.Read(key, [], None, e_context.type, e_context.srcinfo),
+                     e_context.type,
+                     e_context.srcinfo,
+                 )
+@@ -4110,6 +4096,44 @@ def DoStageMem(
+ ):
+     new_name = Sym(new_name)
+ 
++    # PROTOTYPE (plan_derived_window.md): nothing indexes a WindowStmt lhs, so
++    # translate a window name in the staging expression to its root tensor.
++    def find_window_stmt():
++        cur_c = move_back(block_cursor[0])
++        while not isinstance(cur_c._node, LoopIR.proc):
++            s = cur_c._node
++            if isinstance(s, (LoopIR.WindowStmt, LoopIR.Alloc)):
++                if str(s.name) == buf_name:
++                    return s if isinstance(s, LoopIR.WindowStmt) else None
++            cur_c = move_back(cur_c)
++        return None
++
++    if (wstmt := find_window_stmt()) is not None:
++        root_idx = wstmt.rhs.idx
++        n_intervals = sum(isinstance(w, LoopIR.Interval) for w in root_idx)
++        if len(w_exprs) != n_intervals:
++            raise SchedulingError(
++                f"expected windowing of '{buf_name}' to have {n_intervals} "
++                f"indices, but got {len(w_exprs)}"
++            )
++
++        def add_lo(lo, e):
++            return LoopIR.BinOp("+", lo, e, T.index, e.srcinfo)
++
++        w_iter = iter(w_exprs)
++        root_w_exprs = []
++        for wd in root_idx:
++            if isinstance(wd, LoopIR.Point):
++                root_w_exprs.append(wd.pt)
++            else:
++                e = next(w_iter)
++                if isinstance(e, tuple):
++                    root_w_exprs.append((add_lo(wd.lo, e[0]), add_lo(wd.lo, e[1])))
++                else:
++                    root_w_exprs.append(add_lo(wd.lo, e))
++        buf_name = str(wstmt.rhs.name)
++        w_exprs = root_w_exprs
++
+     def get_typ_mem():
+         syms_env = extract_env(block_cursor[0])
+         for name, typ, mem in syms_env:
+@@ -4260,7 +4284,7 @@ def DoStageMem(
+             if idx_contained_by_window(c, block_cursor):
+                 _idx = rewrite_idx(rd.idx)
+                 actualR = True
+-                return {"name": new_name, "idx": _idx}
++                return {"name": new_name, "idx": _idx, "derived": None}
+         elif isinstance(rd, LoopIR.WindowExpr):
+             if any(
+                 isinstance(w, LoopIR.Interval) and not isinstance(w_e, tuple)
+@@ -4274,7 +4298,7 @@ def DoStageMem(
+                 _idx = rewrite_win(rd.idx)
+                 _typ = T.Window(new_typ, rd.type.as_tensor, new_name, _idx)
+                 actualR = True
+-                return {"name": new_name, "idx": _idx, "type": _typ}
++                return {"name": new_name, "idx": _idx, "type": _typ, "derived": None}
+ 
+     def mk_write(c, block_cursor):
+         nonlocal actualR
+@@ -4288,7 +4312,7 @@ def DoStageMem(
+                     actualR = True
+                 if not actualR and w_is_pt:
+                     WShadow = True
+-                return {"name": new_name, "idx": rewrite_idx(s.idx)}
++                return {"name": new_name, "idx": rewrite_idx(s.idx), "derived": None}
+ 
+     for c in block_cursor:
+         ir, fwd = _replace_reads(
+@@ -4301,7 +4325,7 @@ def DoStageMem(
+ 
+     if actualR and not WShadow:
+         load_iter = [Sym(f"i{i}") for i, _ in enumerate(shape)]
+-        load_widx = [LoopIR.Read(s, [], T.index, srcinfo) for s in load_iter]
++        load_widx = [LoopIR.Read(s, [], None, T.index, srcinfo) for s in load_iter]
+         if use_accum_zero:
+             load_rhs = LoopIR.Const(0.0, basetyp, srcinfo)
+         else:
+@@ -4314,9 +4338,11 @@ def DoStageMem(
+                     )
+                 else:
+                     load_ridx.append(w)
+-            load_rhs = LoopIR.Read(buf_name, load_ridx, basetyp, srcinfo)
++            load_rhs = LoopIR.Read(buf_name, load_ridx, None, basetyp, srcinfo)
+ 
+-        load_nest = [LoopIR.Assign(new_name, basetyp, load_widx, load_rhs, srcinfo)]
++        load_nest = [
++            LoopIR.Assign(new_name, basetyp, load_widx, load_rhs, None, srcinfo)
++        ]
+ 
+         for i, n in reversed(list(zip(load_iter, shape))):
+             loop = LoopIR.For(
+@@ -4340,7 +4366,7 @@ def DoStageMem(
+ 
+     if actualW:
+         store_iter = [Sym(f"i{i}") for i, _ in enumerate(shape)]
+-        store_ridx = [LoopIR.Read(s, [], T.index, srcinfo) for s in store_iter]
++        store_ridx = [LoopIR.Read(s, [], None, T.index, srcinfo) for s in store_iter]
+         cp_store_ridx = store_ridx.copy()
+         store_widx = []
+         for w in w_exprs:
+@@ -4351,9 +4377,11 @@ def DoStageMem(
+             else:
+                 store_widx.append(w)
+ 
+-        store_rhs = LoopIR.Read(new_name, store_ridx, basetyp, srcinfo)
++        store_rhs = LoopIR.Read(new_name, store_ridx, None, basetyp, srcinfo)
+         store_stmt = LoopIR.Reduce if use_accum_zero else LoopIR.Assign
+-        store_nest = [store_stmt(buf_name, basetyp, store_widx, store_rhs, srcinfo)]
++        store_nest = [
++            store_stmt(buf_name, basetyp, store_widx, store_rhs, None, srcinfo)
++        ]
+ 
+         for i, n in reversed(list(zip(store_iter, shape))):
+             loop = LoopIR.For(
+@@ -4426,7 +4454,7 @@ def DoUnrollBuffer(alloc_cursor, dim):
+             new_idx = e.idx.copy()
+             del new_idx[dim]
+ 
+-            return {"name": sym, "idx": new_idx}
++            return {"name": sym, "idx": new_idx, "derived": None}
+         elif isinstance(e, LoopIR.WindowExpr):
+             if not isinstance(e.idx[dim], LoopIR.Point):
+                 raise SchedulingError(
+@@ -4444,7 +4472,7 @@ def DoUnrollBuffer(alloc_cursor, dim):
+             new_access = e.idx.copy()
+             del new_access[dim]
+ 
+-            return {"name": sym, "idx": new_access}
++            return {"name": sym, "idx": new_access, "derived": None}
+ 
+     def mk_write(c):
+         s = c._node
+@@ -4460,7 +4488,7 @@ def DoUnrollBuffer(alloc_cursor, dim):
+         new_idx = s.idx.copy()
+         del new_idx[dim]
+ 
+-        return {"name": sym, "idx": new_idx}
++        return {"name": sym, "idx": new_idx, "derived": None}
+ 
+     ir, fwd = alloc_cursor.get_root(), lambda x: x
+     for c in get_rest_of_block(alloc_cursor):
+diff --git a/src/exo/rewrite/LoopIR_unification.py b/src/exo/rewrite/LoopIR_unification.py
+index 468f871f..47bf8367 100644
+--- a/src/exo/rewrite/LoopIR_unification.py
++++ b/src/exo/rewrite/LoopIR_unification.py
+@@ -7,7 +7,9 @@ import pysmt
+ from asdl_adt import ADT
+ from pysmt import shortcuts as SMT
+ 
++from ..core.memory import SpecialWindow
+ from ..core.LoopIR import (
++    LoopIR_Rewrite,
+     LoopIR,
+     T,
+     LoopIR_Do,
+@@ -100,12 +102,75 @@ def DoReplace(call_gen: ProcCallGen, block_cursor: ic.Block):
+     # don't use a different LoopIR.proc for the callsite itself
+     new_call = call_gen.ProcCallGen_make_call(new_args, stmts[0].srcinfo)
+     assert isinstance(new_call, LoopIR.Call)
++    new_call = _auto_derive_special_windows(new_call, block_cursor[0], stmts)
+ 
+     ir, fwd = block_cursor._replace([new_call])
+     Check_Aliasing(ir)
+     return ir, fwd
+ 
+ 
++def _auto_derive_special_windows(call: LoopIR.Call, stmt_cursor, stmts):
++    """PROTOTYPE (plan_derived_window.md): set WindowExpr.derived for args
++    passed to SpecialWindow params, if exactly one in-scope WindowStmt
++    of the same tensor has a matching SpecialWindow."""
++    window_stmts = []
++    c = stmt_cursor
++    while True:
++        try:
++            c = c.prev()
++        except ic.InvalidCursorError:
++            c = c.parent()
++            if c == c.root():
++                break
++        if isinstance(c._node, LoopIR.WindowStmt):
++            window_stmts.append(c._node)
++
++    matched = {}  # buffer Sym -> set of derived values of matched accesses
++
++    class _Collect(LoopIR_Rewrite):
++        def map_s(self, s):
++            if isinstance(s, (LoopIR.Assign, LoopIR.Reduce)):
++                matched.setdefault(s.name, set()).add(s.derived)
++            return super().map_s(s)
++
++        def map_e(self, e):
++            if isinstance(e, (LoopIR.Read, LoopIR.WindowExpr)):
++                matched.setdefault(e.name, set()).add(e.derived)
++            return super().map_e(e)
++
++    _Collect().apply_stmts(stmts)
++
++    new_args = []
++    for a, fa in zip(call.args, call.f.args):
++        if isinstance(a, LoopIR.WindowExpr) and a.derived is None:
++            ds = matched.get(a.name, set())
++            if len(ds) == 1 and None not in ds:
++                a = a.update(derived=next(iter(ds)))
++        mem = getattr(fa, "mem", None)
++        if (
++            isinstance(a, LoopIR.WindowExpr)
++            and a.derived is None
++            and mem is not None
++            and issubclass(mem, SpecialWindow)
++        ):
++            candidates = [
++                s
++                for s in window_stmts
++                if s.special_window is not None
++                and issubclass(s.special_window, mem)
++                and s.rhs.type.src_buf == a.name
++            ]
++            if len(candidates) > 1:
++                raise SchedulingError(
++                    f"ambiguous derived window for {fa.name}: "
++                    f"{[str(s.name) for s in candidates]}"
++                )
++            if candidates:
++                a = a.update(derived=candidates[0].name)
++        new_args.append(a)
++    return call.update(args=new_args)
++
++
+ # --------------------------------------------------------------------------- #
+ # --------------------------------------------------------------------------- #
+ # Unification "System of Equations" grammar
+@@ -559,7 +624,7 @@ class BufVar:
+         buf = self.solution_buf
+         buf_typ = UObj.FV[buf]
+         if not self.case_var:
+-            return LoopIR.Read(buf, [], buf_typ, srcinfo)
++            return LoopIR.Read(buf, [], None, buf_typ, srcinfo)
+         else:
+             which_case = ueq_solutions[self.case_var]
+             case = self.cases[which_case]
+@@ -584,7 +649,7 @@ class BufVar:
+ 
+             as_tensor = T.Tensor(win_shape, True, buf_typ.basetype(), None)
+             w_typ = T.Window(buf_typ, as_tensor, buf, idx)
+-            return LoopIR.WindowExpr(buf, idx, w_typ, srcinfo)
++            return LoopIR.WindowExpr(buf, idx, None, w_typ, srcinfo)
+ 
+ 
+ class Unification:
+@@ -771,7 +836,7 @@ class Unification:
+                 return self.sym_nodes[e.name]
+             else:
+                 typ = self.FV[e.name]
+-                return LoopIR.Read(e.name, [], typ, srcinfo)
++                return LoopIR.Read(e.name, [], None, typ, srcinfo)
+ 
+         elif isinstance(e, UEq.Const):
+             return LoopIR.Const(e.val, T.int, srcinfo)
+diff --git a/src/exo/rewrite/new_eff.py b/src/exo/rewrite/new_eff.py
+index 17d0fb3e..cb49bf1f 100644
+--- a/src/exo/rewrite/new_eff.py
++++ b/src/exo/rewrite/new_eff.py
+@@ -1395,7 +1395,7 @@ class ContextExtraction:
+                 G = self.loop_preenv(s)
+ 
+                 guard_body = LoopIR.If(
+-                    LoopIR.Read(bds_sym, [], T.bool, s.srcinfo),
++                    LoopIR.Read(bds_sym, [], None, T.bool, s.srcinfo),
+                     s.body,
+                     [],
+                     s.srcinfo,
+@@ -1406,14 +1406,16 @@ class ContextExtraction:
+                     E.BindEnv(G),
+                     E.Guard(ABool(bds_sym), body),
+                     E.BindEnv(G_body),
+-                ] + self.loop_posteff(s, LoopIR.Read(hi_sym, [], T.index, s.srcinfo))
++                ] + self.loop_posteff(
++                    s, LoopIR.Read(hi_sym, [], None, T.index, s.srcinfo)
++                )
+         else:
+             return None
+ 
+     def loop_preenv(self, s):
+         assert isinstance(s, LoopIR.For)
+-        old_i = LoopIR.Read(s.iter, [], T.index, s.srcinfo)
+-        new_i = LoopIR.Read(s.iter.copy(), [], T.index, s.srcinfo)
++        old_i = LoopIR.Read(s.iter, [], None, T.index, s.srcinfo)
++        new_i = LoopIR.Read(s.iter.copy(), [], None, T.index, s.srcinfo)
+         pre_body = SubstArgs(s.body, {s.iter: new_i}).result()
+         pre_loop = LoopIR.For(new_i.name, s.lo, old_i, pre_body, s.loop_mode, s.srcinfo)
+         return globenv([pre_loop])
+@@ -1424,8 +1426,8 @@ class ContextExtraction:
+         # but instead generate
+         #   for x' in seq(0, hi-(x+1)): [x' -> x' + (x+1)]s
+         assert isinstance(s, LoopIR.For)
+-        old_i = LoopIR.Read(s.iter, [], T.index, s.srcinfo)
+-        new_i = LoopIR.Read(s.iter.copy(), [], T.index, s.srcinfo)
++        old_i = LoopIR.Read(s.iter, [], None, T.index, s.srcinfo)
++        new_i = LoopIR.Read(s.iter.copy(), [], None, T.index, s.srcinfo)
+         old_plus1 = LoopIR.BinOp(
+             "+", old_i, LoopIR.Const(1, T.int, s.srcinfo), T.index, s.srcinfo
+         )
+@@ -1637,8 +1639,8 @@ def Check_ReorderLoops(proc, s):
+     x2 = x.copy()
+     y2 = y.copy()
+     subenv = {
+-        x: LoopIR.Read(x2, [], T.index, null_srcinfo()),
+-        y: LoopIR.Read(y2, [], T.index, null_srcinfo()),
++        x: LoopIR.Read(x2, [], None, T.index, null_srcinfo()),
++        y: LoopIR.Read(y2, [], None, T.index, null_srcinfo()),
+     }
+     body2 = SubstArgs(body, subenv).result()
+     a_bd = (
+@@ -1709,7 +1711,7 @@ def Check_ParallelizeLoop(proc, s):
+     i = s.iter
+ 
+     i2 = i.copy()
+-    subenv = {i: LoopIR.Read(i2, [], T.index, null_srcinfo())}
++    subenv = {i: LoopIR.Read(i2, [], None, T.index, null_srcinfo())}
+     body2 = SubstArgs(body, subenv).result()
+ 
+     a_bd = expr_effs(s.lo) + expr_effs(s.hi)
+@@ -1763,13 +1765,13 @@ def Check_FissionLoop(proc, loop, stmts1, stmts2, no_loop_var_1=False):
+     j = i.copy()
+     lo = loop.lo
+     hi = loop.hi
+-    subenv = {i: LoopIR.Read(j, [], T.index, null_srcinfo())}
++    subenv = {i: LoopIR.Read(j, [], None, T.index, null_srcinfo())}
+     stmts1_j = SubstArgs(stmts1, subenv).result()
+ 
+     Gloop = loop_globenv(
+         i,
+         LoopIR.Const(0, T.index, null_srcinfo()),
+-        LoopIR.Read(j, [], T.index, null_srcinfo()),
++        LoopIR.Read(j, [], None, T.index, null_srcinfo()),
+         stmts1,
+     )
+     # print("GLOOP")
+diff --git a/src/exo/rewrite/range_analysis.py b/src/exo/rewrite/range_analysis.py
+index 17b56f12..8e12f850 100644
+--- a/src/exo/rewrite/range_analysis.py
++++ b/src/exo/rewrite/range_analysis.py
+@@ -358,7 +358,13 @@ def arg_range_analysis(proc, arg, fast=True):
+         return Check_ExprBound(
+             proc,
+             [proc.body[0]],
+-            LoopIR.Read(name=arg.name, idx=[], type=T.plain_size, srcinfo=proc.srcinfo),
++            LoopIR.Read(
++                name=arg.name,
++                idx=[],
++                derived=None,
++                type=T.plain_size,
++                srcinfo=proc.srcinfo,
++            ),
+             ">=",
+             value,
+             exception=False,
+@@ -368,7 +374,13 @@ def arg_range_analysis(proc, arg, fast=True):
+         return Check_ExprBound(
+             proc,
+             [proc.body[0]],
+-            LoopIR.Read(name=arg.name, idx=[], type=T.plain_size, srcinfo=proc.srcinfo),
++            LoopIR.Read(
++                name=arg.name,
++                idx=[],
++                derived=None,
++                type=T.plain_size,
++                srcinfo=proc.srcinfo,
++            ),
+             "<=",
+             value,
+             exception=False,
+diff --git a/src/exo/spork/cuda_backend.py b/src/exo/spork/cuda_backend.py
+index 12ea0482..82b7f1fc 100644
+--- a/src/exo/spork/cuda_backend.py
++++ b/src/exo/spork/cuda_backend.py
+@@ -252,6 +252,7 @@ class DimensionRewrite(LoopIR_Rewrite):
+                         return LoopIR.Read(
+                             node.name,
+                             [coord.pt for coord in new_idx],
++                            node.derived,
+                             node.type.basetype(),
+                             node.srcinfo,
+                         )
+@@ -552,7 +553,7 @@ class SubtreeScan(LoopIR_Do):
+                 ctx.append_fnarg_decl(
+                     fnarg, c_name, device_args_decls, device_args_comments
+                 )
+-                e = LoopIR.Read(sym, [], self.sym_type(sym), s.srcinfo)
++                e = LoopIR.Read(sym, [], None, self.sym_type(sym), s.srcinfo)
+                 device_args_values.extend(ctx.fnarg_values(e, ctx.is_const(sym), False))
+             else:
+                 # Grid constants are passed as array or scalar by-value
+@@ -817,11 +818,13 @@ class MainLoopRewrite(LoopIR_Rewrite):
+         # nreg = 0
+         stmts.append(LoopIR.Alloc(nreg_nm, i32, CudaRmem, srcinfo))
+         stmts.append(
+-            LoopIR.Assign(nreg_nm, i32, [], LoopIR.Const(0, i32, srcinfo), srcinfo)
++            LoopIR.Assign(
++                nreg_nm, i32, [], LoopIR.Const(0, i32, srcinfo), None, srcinfo
++            )
+         )
+ 
+         def wrap_if_nreg(imm, body):
+-            var = LoopIR.Read(nreg_nm, [], i32, srcinfo)
++            var = LoopIR.Read(nreg_nm, [], None, i32, srcinfo)
+             const = LoopIR.Const(imm, i32, srcinfo)
+             cond = LoopIR.BinOp("==", var, const, T.bool, srcinfo)
+             return LoopIR.If(cond, body, [], srcinfo)
+@@ -843,7 +846,7 @@ class MainLoopRewrite(LoopIR_Rewrite):
+             nreg = info.setmaxnreg
+ 
+             asn = LoopIR.Assign(
+-                nreg_nm, i32, [], LoopIR.Const(nreg, i32, srcinfo), srcinfo
++                nreg_nm, i32, [], LoopIR.Const(nreg, i32, srcinfo), None, srcinfo
+             )
+             stmts.append(wrap_if_threadIdx(lo, hi, [asn]))
+ 
+diff --git a/src/exo/spork/sync_check.py b/src/exo/spork/sync_check.py
+index b3497e7e..5d4aa1cb 100644
+--- a/src/exo/spork/sync_check.py
++++ b/src/exo/spork/sync_check.py
+@@ -21,7 +21,6 @@ from ..core.LoopIR import (
+     LoopIR,
+     LoopIR_Do,
+     BaseCompilerDebugLog,
+-    chain_window_idx,
+     SubstArgs,
+     get_writes_of_stmts,
+ )
+@@ -166,14 +165,12 @@ class CamsporkDo(LoopIR_Do):
+     def want_value(self, nm: Sym):
+         assert isinstance(nm, Sym)
+         set = self._value_syms
+-        typ = self._envtyp[nm]
+-        return nm in set or (isinstance(typ, LoopIR.WindowType) and typ.src_buf in set)
++        return nm in set
+ 
+     def want_sync(self, nm: Sym):
+         assert isinstance(nm, Sym)
+         set = self._sync_syms
+-        typ = self._envtyp[nm]
+-        return nm in set or (isinstance(typ, LoopIR.WindowType) and typ.src_buf in set)
++        return nm in set
+ 
+     def comp_qual_tl(self, node: LoopIR.expr | LoopIR.stmt, instr_tl: Instr_tl):
+         """Get initial Qual_tl, initial Qual_tl as bit, precondition Qual_tl as bits, qual_tl_mask bits
+@@ -184,13 +181,13 @@ class CamsporkDo(LoopIR_Do):
+ 
+         """
+         nm = node.name
+-        typ = self._envtyp[nm]
+-        mem = self._mem_env[typ.src_buf if isinstance(typ, LoopIR.WindowType) else nm]
++        mem = self._mem_env[nm]
+         if issubclass(mem, SpecialWindow):
+-            # Fallback.
+-            # We normally use the underlying memory type (because we rewrite
+-            # window indexing to index the underlying tensor) but this is
+-            # not possible when the SpecialWindow was passed as a proc parameter.
++            # Fallback, only reachable for proc parameters declared with a
++            # SpecialWindow memory: all other accesses index the underlying
++            # tensor (WindowStmt lhs is never indexed; plan_derived_window.md).
++            # Dicey: a SpecialWindow has no qual_tl_dict of its own, so we
++            # assume it behaves like its source_memory_type().
+             mem = mem.source_memory_type()
+         try:
+             q = mem.qual_tl_dict[instr_tl]
+@@ -368,10 +365,9 @@ class CamsporkDo(LoopIR_Do):
+                     f"{s.srcinfo}: sync_check doesn't support loop mode {loop_mode.loop_mode_name()}"
+                 )
+         elif isinstance(s, LoopIR.WindowStmt):
+-            self._envtyp[s.name] = s.rhs.type
+-            assert self._mem_env[s.name] == (
+-                s.special_window or self._mem_env[s.rhs.name]
+-            )
++            # Never indexed (plan_derived_window.md); WindowExpr.derived is
++            # a codegen request irrelevant to synchronization.
++            pass
+ 
+         elif isinstance(s, LoopIR.Alloc):
+             self._saw_alloc = True
+@@ -751,9 +747,6 @@ class CamsporkDo(LoopIR_Do):
+             # effects generated by comp_e here.
+             assert not idx
+             return self.comp_e(caller_a, True, instr_tl)
+-        if isinstance(typ := self._envtyp.get(name), LoopIR.WindowType):
+-            name = typ.src_buf
+-            idx = chain_window_idx(typ.idx, idx, extent_to_modify, 1)
+         am_name = self._builder.get_varname(name)
+         return am_name[tuple(self.comp_e(e, True, instr_tl) for e in idx)]
+ 
+@@ -796,8 +789,6 @@ class CamsporkDo(LoopIR_Do):
+         if all(x == 1 for x in extent):
+             extent = None
+ 
+-        # If this is a read of a SpecialWindow, comp_index_expr takes
+-        # care of additional offset from the WindowStmt.
+         dst = self.comp_index_expr(e.name, idx_lo, instr_tl, extent)
+         return (dst, extent)
+ 
+diff --git a/src/exo/stdlib/scheduling.py b/src/exo/stdlib/scheduling.py
+index e08ac3e2..a3cb95fd 100644
+--- a/src/exo/stdlib/scheduling.py
++++ b/src/exo/stdlib/scheduling.py
+@@ -66,6 +66,7 @@ from ..API_scheduling import (
+     delete_buffer,
+     reuse_buffer,
+     inline_window,
++    insert_window_stmt,
+     stage_mem,
+     unroll_buffer,
+     #
+diff --git a/tests/golden/cuda/test_Sm90a_gemm/test_Sm90a_gemm_remarks.txt b/tests/golden/cuda/test_Sm90a_gemm/test_Sm90a_gemm_remarks.txt
+index 17f57705..7f9f1bd4 100644
+--- a/tests/golden/cuda/test_Sm90a_gemm/test_Sm90a_gemm_remarks.txt
++++ b/tests/golden/cuda/test_Sm90a_gemm/test_Sm90a_gemm_remarks.txt
+@@ -84,10 +84,11 @@ def gpu_gemm(L: size, M: size, N: size, K_split: size, K_cluster: size,
+                                     Sm90_tma_load_multicast_2d(
+                                         A_smem[cta_m, 0:1, iter_k, 0:256,
+                                                0:32],
+-                                        A_tensorMap[batch, 256 * cta_m + 512 *
+-                                                    task_m:256 + 256 * cta_m +
+-                                                    512 * task_m, task_k, 32 *
+-                                                    iter_k:32 + 32 * iter_k],
++                                        A[batch,
++                                          256 * cta_m + 512 * task_m:256 +
++                                          256 * cta_m + 512 * task_m, task_k,
++                                          32 * iter_k:32 + 32 * iter_k]
++                                        @ derived(A_tensorMap),
+                                         dst=f32,
+                                         src=f32,
+                                         ncta=1,
+@@ -108,10 +109,11 @@ def gpu_gemm(L: size, M: size, N: size, K_split: size, K_cluster: size,
+                                     Sm90_tma_load_multicast_2d(
+                                         B_smem[0:2, cta_n, iter_k, 0:192,
+                                                0:32],
+-                                        B_tensorMap[batch, 192 * cta_n + 192 *
+-                                                    task_n:192 + 192 * cta_n +
+-                                                    192 * task_n, task_k, 32 *
+-                                                    iter_k:32 + 32 * iter_k],
++                                        B[batch,
++                                          192 * cta_n + 192 * task_n:192 +
++                                          192 * cta_n + 192 * task_n, task_k,
++                                          32 * iter_k:32 + 32 * iter_k]
++                                        @ derived(B_tensorMap),
+                                         dst=f32,
+                                         src=f32,
+                                         ncta=2,
+@@ -218,10 +220,11 @@ def gpu_gemm(L: size, M: size, N: size, K_split: size, K_cluster: size,
+                                     Sm90_tma_load_multicast_2d(
+                                         A_smem[cta_m, 0:1, iter_k % 4, 0:256,
+                                                0:32],
+-                                        A_tensorMap[batch, 256 * cta_m + 512 *
+-                                                    task_m:256 + 256 * cta_m +
+-                                                    512 * task_m, task_k, 32 *
+-                                                    iter_k:32 + 32 * iter_k],
++                                        A[batch,
++                                          256 * cta_m + 512 * task_m:256 +
++                                          256 * cta_m + 512 * task_m, task_k,
++                                          32 * iter_k:32 + 32 * iter_k]
++                                        @ derived(A_tensorMap),
+                                         dst=f32,
+                                         src=f32,
+                                         ncta=1,
+@@ -242,10 +245,11 @@ def gpu_gemm(L: size, M: size, N: size, K_split: size, K_cluster: size,
+                                     Sm90_tma_load_multicast_2d(
+                                         B_smem[0:2, cta_n, iter_k % 4, 0:192,
+                                                0:32],
+-                                        B_tensorMap[batch, 192 * cta_n + 192 *
+-                                                    task_n:192 + 192 * cta_n +
+-                                                    192 * task_n, task_k, 32 *
+-                                                    iter_k:32 + 32 * iter_k],
++                                        B[batch,
++                                          192 * cta_n + 192 * task_n:192 +
++                                          192 * cta_n + 192 * task_n, task_k,
++                                          32 * iter_k:32 + 32 * iter_k]
++                                        @ derived(B_tensorMap),
+                                         dst=f32,
+                                         src=f32,
+                                         ncta=2,
+@@ -453,14 +457,13 @@ def gpu_gemm(L: size, M: size, N: size, K_split: size, K_cluster: size,
+                                     #   pow2 align = 32 @ src/exo/platforms/Sm90/tk_gemm_util.py:955:20:(s780)
+                                     for ns in seq(0, 6):
+                                         Sm90_tma_reduce_add_2d(
+-                                            C_tensorMap[batch, 256 * cta_m +
+-                                                        512 * task_m:256 +
+-                                                        256 * cta_m +
+-                                                        512 * task_m,
+-                                                        32 * ns + 192 * cta_n +
+-                                                        192 * task_n:32 +
+-                                                        32 * ns + 192 * cta_n +
+-                                                        192 * task_n],
++                                            C[batch,
++                                              256 * cta_m + 512 * task_m:256 +
++                                              256 * cta_m + 512 * task_m,
++                                              32 * ns + 192 * cta_n +
++                                              192 * task_n:32 + 32 * ns +
++                                              192 * cta_n + 192 * task_n]
++                                            @ derived(C_tensorMap),
+                                             C_smem[cta_m, cta_n, ns, 0:256,
+                                                    0:32],
+                                             dst=f32,
+diff --git a/tests/golden/cuda/test_simple_cuda/test_tmp_xgemm_Sm80_golden.txt b/tests/golden/cuda/test_simple_cuda/test_tmp_xgemm_Sm80_golden.txt
+index 7705ace3..c6e44e94 100644
+--- a/tests/golden/cuda/test_simple_cuda/test_tmp_xgemm_Sm80_golden.txt
++++ b/tests/golden/cuda/test_simple_cuda/test_tmp_xgemm_Sm80_golden.txt
+@@ -246,6 +246,7 @@ struct exo_win_3f32 {
+     const exo_control_t strides[3];
+ };
+ #endif
++/* Required by CudaDeviceVisibleAtomicity16B */
+ /* Required by CudaGmemAtomicity16B */
+ #ifndef EXO_WIN_1F32C
+ #define EXO_WIN_1F32C
+@@ -286,7 +287,6 @@ using exo_CudaRmemPacked32_bf16 = exo_CudaRmemPacked32<int32_t, __nv_bfloat16, _
+ #endif
+ 
+ #endif
+-/* Required by CudaDeviceVisibleAtomicity16B */
+ /* Required by CudaGmemLinear */
+ #ifndef EXO_WIN_2F32C
+ #define EXO_WIN_2F32C
+@@ -498,6 +498,7 @@ struct exo_win_3f32 {
+     const exo_control_t strides[3];
+ };
+ #endif
++/* Required by CudaDeviceVisibleAtomicity16B */
+ /* Required by CudaGmemAtomicity16B */
+ #ifndef EXO_WIN_1F32C
+ #define EXO_WIN_1F32C
+@@ -538,7 +539,6 @@ using exo_CudaRmemPacked32_bf16 = exo_CudaRmemPacked32<int32_t, __nv_bfloat16, _
+ #endif
+ 
+ #endif
+-/* Required by CudaDeviceVisibleAtomicity16B */
+ /* Required by CudaGmemLinear */
+ #ifndef EXO_WIN_2F32C
+ #define EXO_WIN_2F32C
+diff --git a/tests/golden/test_schedules/test_inline_window.txt b/tests/golden/test_schedules/test_inline_window.txt
+index c514ec9a..778df3ab 100644
+--- a/tests/golden/test_schedules/test_inline_window.txt
++++ b/tests/golden/test_schedules/test_inline_window.txt
+@@ -4,5 +4,5 @@ def foo(n: size, m: size, x: R[n, m] @ DRAM):
+     for i in seq(0, n - 4):
+         for j in seq(0, m - 4):
+             a: R @ DRAM
+-            a = x[i, j] * x[i + 2, j + 1]
+-            x[i + 2, j + 1] = a + x[i + 1, j + 1]
+\ No newline at end of file
++            a = x[i, j] * x[2 + i, 1 + j]
++            x[2 + i, 1 + j] = a + x[i + 1, j + 1]
+\ No newline at end of file
+diff --git a/tests/golden/test_schedules/test_join_loops_body_match.txt b/tests/golden/test_schedules/test_join_loops_body_match.txt
+index 54ba7b42..45a9c146 100644
+--- a/tests/golden/test_schedules/test_join_loops_body_match.txt
++++ b/tests/golden/test_schedules/test_join_loops_body_match.txt
+@@ -7,4 +7,4 @@ def foo(n: size, x: i8[n + 1] @ DRAM):
+                 pass
+         a: i8[4, 2] @ DRAM
+         y = a[1:3, 1:2]
+-        do_nothing(y)
+\ No newline at end of file
++        do_nothing(a[1:3, 1:2] @ derived(y))
+\ No newline at end of file
+diff --git a/tests/golden/test_schedules/test_product_loop5.txt b/tests/golden/test_schedules/test_product_loop5.txt
+index 0462591b..1b425c76 100644
+--- a/tests/golden/test_schedules/test_product_loop5.txt
++++ b/tests/golden/test_schedules/test_product_loop5.txt
+@@ -2,4 +2,4 @@ def foo(n: size, m: size, x: R[n, 100] @ DRAM):
+     assert m < n
+     x2 = x[0:m, 0:30]
+     for ij in seq(0, m * 30):
+-        x2[ij / 30, ij % 30] = 0.0
+\ No newline at end of file
++        x[ij / 30, ij % 30] @ derived(x2) = 0.0
+\ No newline at end of file
+diff --git a/tests/golden/test_schedules/test_simplify_with_window_stmts.txt b/tests/golden/test_schedules/test_simplify_with_window_stmts.txt
+index 0997cbaa..88d67f3d 100644
+--- a/tests/golden/test_schedules/test_simplify_with_window_stmts.txt
++++ b/tests/golden/test_schedules/test_simplify_with_window_stmts.txt
+@@ -1,4 +1,4 @@
+ def foo(n: size):
+     x: i8[1] @ DRAM
+     x_window = x[0:1]
+-    x_window[0] = 0.0
+\ No newline at end of file
++    x[0] @ derived(x_window) = 0.0
+\ No newline at end of file
+diff --git a/tests/test_range_analysis.py b/tests/test_range_analysis.py
+index 1999cca7..c1cd1a8e 100644
+--- a/tests/test_range_analysis.py
++++ b/tests/test_range_analysis.py
+@@ -361,7 +361,7 @@ def test_index_range_env():
+     node = loop._impl._node
+ 
+     N_read = LoopIR.Read(
+-        foo._loopir_proc.args[0].name, [], T.plain_size, foo._loopir_proc.srcinfo
++        foo._loopir_proc.args[0].name, [], None, T.plain_size, foo._loopir_proc.srcinfo
+     )
+ 
+     def run_N_asserts():
+@@ -405,7 +405,7 @@ def test_index_range_env():
+     run_N_asserts()
+ 
+     env.add_loop_iter(node.iter, node.lo, node.hi)
+-    i_read = LoopIR.Read(node.iter, [], T.index, foo._loopir_proc.srcinfo)
++    i_read = LoopIR.Read(node.iter, [], None, T.index, foo._loopir_proc.srcinfo)
+ 
+     run_N_asserts()
+ 
+@@ -431,9 +431,9 @@ def test_index_range_env():
+     node = loop._impl._node
+     env.add_loop_iter(node.iter, node.lo, node.hi)
+     N_read = LoopIR.Read(
+-        foo._loopir_proc.args[0].name, [], T.plain_size, foo._loopir_proc.srcinfo
++        foo._loopir_proc.args[0].name, [], None, T.plain_size, foo._loopir_proc.srcinfo
+     )
+-    j_read = LoopIR.Read(node.iter, [], T.index, foo._loopir_proc.srcinfo)
++    j_read = LoopIR.Read(node.iter, [], None, T.index, foo._loopir_proc.srcinfo)
+     assert env.check_expr_bounds(
+         M_value, IndexRangeEnvironment.eq, j_read, IndexRangeEnvironment.eq, M_value
+     )
+diff --git a/src/exo/core/derived_window.py b/src/exo/core/derived_window.py
+new file mode 100644
+index 00000000..accbf163
+--- /dev/null
++++ b/src/exo/core/derived_window.py
+@@ -0,0 +1,284 @@
++"""Derived windows (WindowStmt) as codegen-only aliases.
++
++PROTOTYPE (branch akeley98/derived_window); see endgame_plan/plan_derived_window.md.
++
++Invariant after desugar_derived_windows: no expression or statement indexes
++the lhs of a WindowStmt. Every use of a derived window `w = x[widx]` is
++rewritten to index the underlying tensor `x` directly. A WindowExpr that
++was (or should be, for SpecialWindow) taken from `w` records this in its
++`derived` attribute, which rewrites pass through un-inspected.
++
++unify_derived_windows runs just before codegen and converts each
++`x[idx] (derived=w)` back to `w[idx']`, i.e. what the WindowExpr would have
++been prior to desugaring.
++"""
++
++from __future__ import annotations
++
++from collections import ChainMap
++from typing import Optional
++
++from .LoopIR import LoopIR, LoopIR_Rewrite, T, chain_window_idx, create_window_type
++from .prelude import Sym
++
++
++class _ScopedRewrite(LoopIR_Rewrite):
++    """LoopIR_Rewrite with a lexically-scoped env of WindowStmt rhs."""
++
++    def __init__(self):
++        # WindowStmt lhs Sym -> WindowStmt
++        self.env = ChainMap()
++
++    def push(self):
++        self.env = self.env.new_child()
++
++    def pop(self):
++        self.env = self.env.parents
++
++    def map_s(self, s):
++        if isinstance(s, (LoopIR.For, LoopIR.If)):
++            self.push()
++            stmts = super().map_s(s)
++            self.pop()
++            return stmts
++        return super().map_s(s)
++
++    def map_stmts(self, stmts):
++        # Body of For/If is mapped inside the push/pop of map_s, but
++        # each statement list (body/orelse) is still its own scope.
++        self.push()
++        result = super().map_stmts(stmts)
++        self.pop()
++        return result
++
++
++def _root(window_stmt):
++    """(root tensor Sym, root-relative idx) of a desugared WindowStmt
++
++    Uses rhs.name/rhs.idx, not rhs.type: after desugaring the rhs always
++    indexes the root tensor, while some rewrites leave T.Window.src_buf stale.
++    """
++    return window_stmt.rhs.name, window_stmt.rhs.idx
++
++
++def _pts(idx):
++    return [w.pt if isinstance(w, LoopIR.Point) else w for w in idx]
++
++
++class DesugarDerivedWindows(_ScopedRewrite):
++    def __init__(self, proc):
++        super().__init__()
++        self.result = self.apply_proc(proc)
++
++    def map_s(self, s):
++        if isinstance(s, LoopIR.WindowStmt):
++            new_s = (super().map_s(s) or [s])[0]
++            self.env[s.name] = new_s
++            return [new_s]
++        if isinstance(s, (LoopIR.Assign, LoopIR.Reduce)) and s.name in self.env:
++            new_s = (super().map_s(s) or [s])[0]
++            root, widx = _root(self.env[s.name])
++            idx = _pts(chain_window_idx(widx, new_s.idx))
++            return [new_s.update(name=root, idx=idx, derived=s.name)]
++        return super().map_s(s)
++
++    def map_e(self, e):
++        new_e = super().map_e(e) or e
++        if not hasattr(e, "name") or e.name not in self.env:
++            return new_e if new_e is not e else None
++        wstmt = self.env[e.name]
++        root, widx = _root(wstmt)
++        if isinstance(e, LoopIR.Read):
++            if new_e.idx:
++                idx = _pts(chain_window_idx(widx, new_e.idx))
++                return new_e.update(name=root, idx=idx, derived=e.name)
++            # Bare window passed as call argument.
++            return wstmt.rhs.update(derived=e.name, srcinfo=e.srcinfo)
++        elif isinstance(e, LoopIR.WindowExpr):
++            assert e.derived is None
++            # Don't trust new_e.type: may be relative to an inlined window param.
++            idx = chain_window_idx(widx, new_e.idx)
++            # Keep the use's as_tensor (its shape doesn't depend on the root).
++            typ = T.Window(wstmt.rhs.type.src_type, new_e.type.as_tensor, root, idx)
++            return new_e.update(name=root, idx=idx, type=typ, derived=e.name)
++        elif isinstance(e, LoopIR.StrideExpr):
++            dims = [d for d, w in enumerate(widx) if isinstance(w, LoopIR.Interval)]
++            return new_e.update(name=root, dim=dims[e.dim])
++        else:
++            assert False, f"unexpected {type(e)} of derived window"
++
++
++def desugar_derived_windows(proc):
++    return DesugarDerivedWindows(proc).result
++
++
++def desugar_derived_windows_stmts(stmts):
++    d = DesugarDerivedWindows.__new__(DesugarDerivedWindows)
++    _ScopedRewrite.__init__(d)
++    return d.apply_stmts(stmts)
++
++
++class DerivedWindowError(TypeError):
++    pass
++
++
++def _sub(a, lo):
++    if isinstance(lo, LoopIR.Const) and lo.val == 0:
++        return a
++    diff = _affine(a)
++    _affine(lo, -1, diff)
++    if all(v == 0 for k, v in diff.items() if k != ""):
++        return LoopIR.Const(diff.get("", 0), T.int, a.srcinfo)
++    # Try cancelling lo against top-level summands of a, e.g. (i + 4*j) - 4*j
++    summands = []
++
++    def flatten(e):
++        if isinstance(e, LoopIR.BinOp) and e.op == "+":
++            flatten(e.lhs)
++            flatten(e.rhs)
++        else:
++            summands.append(e)
++
++    flatten(a)
++    target = {k: v for k, v in _affine(lo).items() if v != 0}
++    kept = []
++    for t in summands:
++        t_aff = {k: v for k, v in _affine(t).items() if v != 0}
++        if t_aff and all(target.get(k) == v for k, v in t_aff.items()):
++            for k in t_aff:
++                del target[k]
++        else:
++            kept.append(t)
++    if not target and kept:
++        result = kept[0]
++        for t in kept[1:]:
++            result = LoopIR.BinOp("+", result, t, T.index, a.srcinfo)
++        return result
++    if isinstance(a, LoopIR.BinOp) and a.op == "+" and str(a.lhs) == str(lo):
++        return a.rhs
++    return LoopIR.BinOp("-", a, lo, T.index, a.srcinfo)
++
++
++def _affine(e, scale=1, acc=None):
++    """Affine normal form {atom: coeff} with "" as the constant's key.
++    Non-affine subterms are opaque atoms keyed by their printed form."""
++    acc = {} if acc is None else acc
++
++    def add(k, v):
++        acc[k] = acc.get(k, 0) + v
++
++    if isinstance(e, LoopIR.Const):
++        add("", scale * e.val)
++    elif isinstance(e, LoopIR.Read) and not e.idx:
++        add(e.name, scale)
++    elif isinstance(e, LoopIR.USub):
++        _affine(e.arg, -scale, acc)
++    elif isinstance(e, LoopIR.BinOp) and e.op in ("+", "-"):
++        _affine(e.lhs, scale, acc)
++        _affine(e.rhs, scale if e.op == "+" else -scale, acc)
++    elif (
++        isinstance(e, LoopIR.BinOp) and e.op == "*" and isinstance(e.lhs, LoopIR.Const)
++    ):
++        _affine(e.rhs, scale * e.lhs.val, acc)
++    elif (
++        isinstance(e, LoopIR.BinOp) and e.op == "*" and isinstance(e.rhs, LoopIR.Const)
++    ):
++        _affine(e.lhs, scale * e.rhs.val, acc)
++    else:
++        add(("opaque", str(e)), scale)
++    return acc
++
++
++def _same(a, b):
++    # Affine normalization; TODO consider SMT with context (if conditions).
++    diff = _affine(a)
++    _affine(b, -1, diff)
++    return all(v == 0 for v in diff.values())
++
++
++class UnifyDerivedWindows(_ScopedRewrite):
++    def __init__(self, proc):
++        super().__init__()
++        self.result = self.apply_proc(proc)
++
++    def unify_idx(self, node, idx):
++        """Return (window Sym, window stmt, idx relative to the window)
++
++        Point coordinates of the WindowStmt must equal the access's (affine
++        normalization). Intervals are NOT checked for containment in the
++        window: TMA tail tiles routinely extend past the Sm90_tensorMap
++        window, relying on the UNSOUND allow_out_of_bounds hack
++        (see AccessInfo.allow_out_of_bounds). For plain windows an access
++        outside the window but inside the tensor is the same address anyway.
++        """
++        w = node.derived
++        wstmt = self.env.get(w)
++        if wstmt is None:
++            raise DerivedWindowError(
++                f"{node.srcinfo}: {node} requests derived window {w}, "
++                f"which is not in scope (statements re-ordered or deleted?)"
++            )
++        root, widx = _root(wstmt)
++        if root != node.name:
++            raise DerivedWindowError(
++                f"{node.srcinfo}: {node} requests derived window {w} of {root}"
++            )
++        new_idx = []
++        for wd, ed in zip(widx, idx):
++            is_pt = not isinstance(ed, LoopIR.Interval)
++            pt = ed.pt if isinstance(ed, LoopIR.Point) else ed
++            if isinstance(wd, LoopIR.Point):
++                if not is_pt or not _same(wd.pt, pt):
++                    raise DerivedWindowError(
++                        f"{node.srcinfo}: {node} cannot be expressed through "
++                        f"{w} = {wstmt.rhs}: point coordinate {wd.pt} not matched"
++                    )
++            elif isinstance(ed, LoopIR.Point):
++                new_idx.append(ed.update(pt=_sub(ed.pt, wd.lo)))
++            elif isinstance(ed, LoopIR.Interval):
++                new_idx.append(ed.update(lo=_sub(ed.lo, wd.lo), hi=_sub(ed.hi, wd.lo)))
++            else:
++                new_idx.append(_sub(ed, wd.lo))
++        return w, wstmt, new_idx
++
++    def map_s(self, s):
++        if isinstance(s, LoopIR.WindowStmt):
++            new_s = (super().map_s(s) or [s])[0]
++            self.env[s.name] = s  # root form, pre-unify
++            return [new_s]
++        if isinstance(s, (LoopIR.Assign, LoopIR.Reduce)) and s.derived is not None:
++            new_s = (super().map_s(s) or [s])[0]
++            w, _, idx = self.unify_idx(new_s, new_s.idx)
++            return [new_s.update(name=w, idx=idx, derived=None)]
++        return super().map_s(s)
++
++    def map_e(self, e):
++        new_e = super().map_e(e)
++        if not isinstance(e, (LoopIR.WindowExpr, LoopIR.Read)) or e.derived is None:
++            return new_e
++        e = new_e or e
++        w, wstmt, idx = self.unify_idx(e, e.idx)
++        if isinstance(e, LoopIR.Read):
++            return e.update(name=w, idx=idx, derived=None)
++        typ = create_window_type(w, wstmt.rhs.type, idx)
++        return LoopIR.WindowExpr(w, idx, None, typ, e.srcinfo)
++
++
++def unify_derived_windows(proc):
++    return UnifyDerivedWindows(proc).result
++
++
++def check_no_config_reads(window_expr, err):
++    """Window statement indices must not read configs: desugaring moves the
++    index computation to each use, which is wrong if the config changes."""
++    found = []
++
++    class _Find(LoopIR_Rewrite):
++        def map_e(self, e):
++            if isinstance(e, LoopIR.ReadConfig):
++                found.append(e)
++            return super().map_e(e)
++
++    _Find().apply_e(window_expr)
++    if found:
++        err(f"window statement index cannot read config {found[0]}")
