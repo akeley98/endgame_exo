@@ -28,3 +28,14 @@ Update the linked complaint when this task is done.
 
 * Remove the `atomic_qual_mask` exemption in camspork's `syncv_table.cpp`:
   `CAMSPORK_REQUIRE_CMP((access.qual_tl_mask & access.precondition_qual_bits & ~atomic_qual_mask),`
+
+## Status (2026-11-07)
+
+Implemented on exo `akeley98/camspork_trace_proto` (`7c82d4a0`). `tests/cuda`: 454 tests, 0 failures (87 skipped).
+
+* Deviation (approved by David Zhao Akeley): `cpu_in_order_qual` and `cpu_cuda_stream_qual` changed proxy class `neither` -> `generic_ram`.
+  They are in the GMEM/SMEM `qual_tl_dict`, so their mask class must be `data_ram`, and the `data_ram` iff not-`neither` assertion forces this.
+  `needs_proxy_fence` is unaffected in practice: the only sync-tls containing them are `cpu_in_order` (CPU only) and `cuda_stream_sync`, which already contains generic qual-tls.
+* `make_qual_tl_mask` also asserts every `qual_tl_dict` qual-tl is in the mask class.
+* `SpecialWindow.qual_mask_class` delegates to `source_memory_type()`, like `sync_exempt`.
+* Abstract bases (`CudaBasicDeviceVisible`, `CudaDeviceVisibleAtomicity16B`, `CudaDeviceVisibleLinear`, `CudaGmemAtomicity16B`) don't implement it; the classes that set a `qual_tl_dict` do.

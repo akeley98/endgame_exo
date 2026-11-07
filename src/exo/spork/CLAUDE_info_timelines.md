@@ -4,6 +4,8 @@ Defines the timeline vocabulary used by sync-check and CUDA codegen:
 * `DeviceScope`: CPU vs CUDA scope; allowed instr-tls; default instr-tl for non-instr accesses.
 * `Qual_tl`: qualitative timeline; each gets a bit index (camspork `qual_bits_t` is 32 bits; 21 used as of 2026-09-29).
   Each has an implementation class (`in_order` / `out_of_order` / `atomic`) and a proxy class (`generic_ram` / `async_ram` / `neither`); `Qual_tl.get_impl_class_bits` / `get_proxy_class_bits` give masks ([plan_remove_vis_flags.md](../../../plan_remove_vis_flags.md)).
+  Each also has a mask class `QualMaskClass` (`data_ram` / `cuda_rmem` / `mbarrier` / `tcgen05`); asserted `data_ram` iff the proxy class is not `neither`, so the CPU qual-tls are `generic_ram`.
+  `MemWin.qual_mask_class()` (`NotImplementedError` by default; implemented by every non-`sync_exempt` memory) selects `MemWin.make_qual_tl_mask() = Qual_tl.get_mask_class_bits(...)`, which now includes atomic qual-tls ([plan_QtlMask_atomics.md](../../../plan_QtlMask_atomics.md)).
 * `InstrQuals(initial, precondition=...)`: value type of `qual_tl_dict`s (`cuda_rmem_`, `cuda_ram_`, `cuda_tmem_`, `cuda_mbarrier_qual_tl_dict`); precondition defaults to `{initial}`, asserts no out-of-order or atomic members. Atomic QualTLs come from the instr's `AtomicityInfo` instead.
 * `Sync_tl`: a single timeline set; `implements_first/second` are subset tests; asserts no atomic members.
   `cuda_temporal` is gone; `cuda_mbarrier_only = {mbar}`, `cuda_async_proxy_retired = {mbar, async}` ([plan_proxy_fence_rules.md](../../../plan_proxy_fence_rules.md)).

@@ -110,6 +110,10 @@ Proposed `allocTrDetail` / `freeTrDetail`, matching `exec.cpp` `SyncEnvManageRin
    David Zhao Akeley: the spec is correct; camspork is wrong. Probably drop the auto-deduction of `QtlMask` (some other time).
    Fixing camspork alone (masking atomics) would make existing atomic-after-atomic sync checks fail until the masks include atomic qual-tls.
    The reference raises `NotImplementedError` for atomics until then; when implemented it follows the spec (masked).
+   **Status (2026-11-07, [plan_QtlMask_atomics.md](plan_QtlMask_atomics.md), exo `akeley98/camspork_trace_proto`): `QtlMask` half fixed.**
+   `make_qual_tl_mask` is no longer deduced from `qual_tl_dict`; it is all qual-tls of the memory's `QualMaskClass`, so GMEM/SMEM masks now include both atomic qual-tls.
+   The atomic exemption in the `alloc_vis_record` mask `REQUIRE` is removed. `tests/cuda` passes.
+   Still open: camspork's atomic observers (`[0, UINT32_MAX) × atomic`) and access checks remain unmasked; now that the masks contain the atomic bits, masking them should be a no-op for data RAM.
 3. **`JoinThreads`** (above): a camspork-only sync event. David Zhao Akeley: JoinThreads will not be in the spec; the reference keeps it as a documented DEVIATION.
 4. **Implicit syncs from `sync_check.py` lowering** show up in every trace: before the device function, `Fence(cpu ∪ cuda_stream, cuda_stream)` by the CPU;
    `JoinThreads` at the end of each device task; `JoinThreads` then `Fence(cuda_stream, cuda_stream)` by the CPU after the function.
