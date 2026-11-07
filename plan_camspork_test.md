@@ -212,6 +212,15 @@ Tests (`tests/cuda/test_camspork_trace.py`, `test_read_then_reduce_*`):
 
 The reference keeps the rule by default (`discard_reads_on_mutate=True`) so the other traces match camspork.
 
+Cost of dropping the rule (exo `akeley98/experiment_keep_prior_reads`, `e3425bdf`, env var `CAMSPORK_KEEP_PRIOR_READS`):
+* sporkbench, 19 procs (17 with managed ring buffers, incl. ping-pong and split-K), 76 calls:
+  * total sync_check time 1.02x; ring-buffer procs 1.02x;
+  * worst case `unflash_attn_S_kernel` 1.18x (0.225 -> 0.264 s);
+  * no sync_check failures in either mode.
+* `tests/cuda`: only `test_camspork_trace` changes.
+  * `test_window_overlapping` and `test_read_then_reduce_1_task` keep read records, and match the reference with `discard_reads_on_mutate=False`.
+  * The 2-task strict xfail now passes.
+
 ## Proposed order
 
 1. Move `ref_device_function`, plus task/cluster helpers, into `camspork_ref.py`; add the free-trace hook. (srcinfo: done.)
