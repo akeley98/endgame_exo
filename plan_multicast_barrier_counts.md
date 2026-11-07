@@ -63,9 +63,9 @@ If `E` is set: `count == E`. This replaces "arrive count must be 1 (one-shot)".
 
 ### Pre-arrive
 
-sync_check currently emits one `b.Arrive(0, bar[idx], ...)` per pre-arrived element (`sync_check.py:426-437`).
-Replace it with an operation that sets the count to `E` (requires count 0, creates no pending awaits).
-For example a `PreArrive` camspork statement, or a flag on the Arrive node.
+Done at allocation: `BarrierEnvAlloc(..., managed_ring_buffer_dim_idx, pre_arrive_count)` starts every element whose
+ring index is `< pre_arrive_count` at count `E`, with no pending awaits and no trace event.
+(Originally sync_check emitted one `b.Arrive(0, bar[idx], ...)` per pre-arrived element; see "Implementation status".)
 
 ### Trailing barrier expressions
 
@@ -206,8 +206,7 @@ for cta in cuda_threads(0, 2, unit=cuda_cta_in_cluster):
 ## Implementation status (2026-11-07, exo `akeley98/literal_mbarrier_counts`, uncommitted)
 
 Steps 1-7 are implemented; step 8 (doc notes) is the list at the end of this section.
-`tests/cuda`: the full run had 5 failures, all fixed afterwards (below), and the affected files pass on re-run.
-The full suite was not re-run after those test/golden-only fixes.
+`tests/cuda`: 467 tests, 0 failures, 87 skipped (full run after the pre-arrive follow-up).
 
 **Audit (step 5):** all 36 Sm90 sporkbench scripts (60 sync_check calls: handwrite/schedule GEMMs incl. m1n2, m2n1, ping-pong, split-K;
 row-major GEMMs; tk_fa; unflash_attn) pass under strict Await, run from a scratch copy so sporkbench's `.json` outputs weren't touched.
@@ -223,12 +222,17 @@ So no real kernel relied on an Await seeing a peer's arrive from the same loop i
 * `test_arrive_incompatible_multicasts_positive`: one ring element per Arrive, Awaits in a later loop nest, and now actually sync-checked.
 
 **Complications found:**
-1. **Pre-arrive needed a camspork grammar change.** sync_check issues pre-arrives from the allocating collective (the whole cluster),
-   so a per-thread increment would be wrong. `Arrive` gained a `flags` field (`arrive_pre_arrive_flag`: count := E, no PendingAwaits).
-   It's still traced as an Arrive event by the allocating threads, and the reference's `pre_arrive` does the same.
+1. **Pre-arrive moved into barrier allocation** (follow-up, David Zhao Akeley's suggestion).
+   sync_check used to issue one `Arrive` per pre-arrived element from the allocating collective (the whole cluster),
+   which doesn't fit per-thread increments; the first version added an Arrive flag for it.
+   Now `BarrierEnvAlloc` takes `managed_ring_buffer_dim_idx` and `pre_arrive_count`, and syncv `alloc_barriers`
+   (given the ring dimension's stride and extent) starts elements with ring index `< pre_arrive_count` at the expected count.
+   The Arrive flag and sync_check's inserted Arrives are gone. This also drops sync_check's old requirement that all barrier extents be constant,
+   and the history log no longer shows phantom Arrives (blamed on unrelated statements, with a cluster-wide cuboid).
+   In the reference, `alloc_barrier(..., ring_dim=, pre_arrive=)`; there's no trace event.
 2. **History log holds one barrier per sync statement** (`set_syncv_sync_stmt_info` is state for later log calls).
    With no home, it logs the first target's counts. Error messages for multicast Arrives show only one barrier.
-3. **Goldens:** the 4 `test_3cycle_mbarrier` error-remark goldens change, only in logged counts (`0 -> 1` becomes `0 -> 32`, `<= 0` becomes `<= 31`, etc.).
+3. **Goldens:** the 4 `test_3cycle_mbarrier` error-remark goldens change: logged counts (`0 -> 1` becomes `0 -> 32`, `<= 0` becomes `<= 31`, etc.), then (item 1) the pre-arrive remarks are deleted.
    Pytest's truncated diff showed only a source-path line, which is misleading; regenerate with `--update-golden` to see the real diff.
 4. **`test_ping_pong_reorder_arrive_raw`** (producer's `raw` Arrive moved before its TMA) expected the deleted trailing-barrier message.
    It's still rejected, but later: the TMA's trailing PendingAwait gets the already-complete count (`raw[0, 0, 0, 0] arrive_count=64`),
