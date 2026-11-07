@@ -55,9 +55,11 @@ Straightforward. The prototype implements Post/Pre access (convergent and separa
 
 ### `SyncEnvImpl.tex` optimizations: what actually exists
 
-1. Mutate discards prior reads: `copy_on_write_update` in `checked_on_access_impl`. Implemented in the reference (OPT).
-   The second half of the bullet (non-atomic mutate discards prior mutates) was **removed** from camspork in exo `03434218` (finding below).
-   The prototype reference on `akeley98/camspork_trace_proto` still implements it and must be updated after rebasing.
+1. Mutate discards prior reads / non-atomic mutate discards prior mutates (`copy_on_write_update` in `checked_on_access_impl`). **Both removed** from camspork:
+   * prior mutates: exo `03434218` (finding below);
+   * prior reads: exo `4cb8da49`, unsound across tasks (see "Finding: ... unsound across tasks").
+
+   The reference uses spec semantics: all prior records are kept.
    **Finding (2026-11-07): the mutate-clears-mutates rule is load-bearing, not just a performance optimization.**
    * Experiment: exo `akeley98/experiment_keep_prior_mutates` (`1527e110`), env var `CAMSPORK_KEEP_PRIOR_MUTATES`.
    * Selected sporkbench kernels (pldi Sm80 starter, Sm90a f32/bf16 GEMMs, tk_fa, unflash_attn; 56 sync_check calls) all still pass. Total time is 1.06x, worst case 2.1x on `unflash_attn_S_kernel`.
@@ -206,11 +208,15 @@ David Zhao Akeley's counterexample:
 Tests (`tests/cuda/test_camspork_trace.py`, `test_read_then_reduce_*`):
 * **1 task:** a full trace comparison. It passes, and it is the first test of atomics: TMA reduce with `Tid x Q_atom` masked, TAG 32. This needs exo `7c82d4a0` (QtlMask includes atomic qual-tls).
 * **2 tasks, every task reads:** both camspork and the reference reject. But the rejection comes from task 1's *read* (RAW vs task 0's reduce), which masks the WAR.
-* **2 tasks, only task 0 reads:** the unsound case. Strict xfail: camspork accepts.
-  The reference with spec semantics (`SyncEnvRef(discard_reads_on_mutate=False)`) rejects at `g[0, 0]`, thread 32 (task 1), during task 1's reduce.
+* **2 tasks, only task 0 reads:** the unsound case. Before the fix, camspork accepted it (strict xfail).
+  The spec-semantics reference rejects at `g[0, 0]`, thread 32 (task 1), during task 1's reduce.
 * Experiment, not committed: with camspork's read clearing disabled, the same case reports `WAR HAZARD`, and the 1-task case still passes.
 
-The reference keeps the rule by default (`discard_reads_on_mutate=True`) so the other traces match camspork.
+**Fixed** in exo `4cb8da49` (on `akeley98/camspork_trace_proto`):
+* camspork keeps prior read records on a mutate;
+* the reference's `discard_reads_on_mutate` option is removed;
+* `test_read_then_reduce_2_tasks_negative` passes;
+* `tests/cuda`: 370 passed.
 
 Cost of dropping the rule (exo `akeley98/experiment_keep_prior_reads`, `e3425bdf`, env var `CAMSPORK_KEEP_PRIOR_READS`):
 * sporkbench, 19 procs (17 with managed ring buffers, incl. ping-pong and split-K), 76 calls:
