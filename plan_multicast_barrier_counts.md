@@ -203,6 +203,50 @@ for cta in cuda_threads(0, 2, unit=cuda_cta_in_cluster):
   and actually run sync_check on it (`cuda_cpu_test` doesn't).
 * `test_sync_error_Sm90a_gemm.py` and the golden tests must pass unchanged (this plan changes no codegen or printing).
 
+## Implementation status (2026-11-07, exo `akeley98/literal_mbarrier_counts`, uncommitted)
+
+Steps 1-7 are implemented; step 8 (doc notes) is the list at the end of this section.
+`tests/cuda`: the full run had 5 failures, all fixed afterwards (below), and the affected files pass on re-run.
+The full suite was not re-run after those test/golden-only fixes.
+
+**Audit (step 5):** all 36 Sm90 sporkbench scripts (60 sync_check calls: handwrite/schedule GEMMs incl. m1n2, m2n1, ping-pong, split-K;
+row-major GEMMs; tk_fa; unflash_attn) pass under strict Await, run from a scratch copy so sporkbench's `.json` outputs weren't touched.
+So no real kernel relied on an Await seeing a peer's arrive from the same loop iteration.
+
+**Tests added** (`tests/cuda/test_camspork_trace.py`, all passing):
+* positive trace comparisons: 2-CTA multicast with 1 and 2 arriving warps (`z = 32` / `64` on CTA 1's records, where the home rule gave 0),
+  4-CTA multicast along `n` only, pre-arrive, and a `seq` loop between the CTA loop and the Arrive (previously rejected statically);
+* negatives (both reject): Await in the same CTA body as its multicast Arrive, two Arrives on one element ("Too many arrives: 96 exceeds 64"),
+  `if cta == 0:` around the Arrive, and the turnstile with `lag=1` and `lag=2`.
+  All of these fail in camspork with the intended message ("arrive count 32 of expected 64" etc.), checked by hand.
+  Before the convergence check was deleted, the last three failed statically, so `check_both_fail` would have passed for the wrong reason.
+* `test_arrive_incompatible_multicasts_positive`: one ring element per Arrive, Awaits in a later loop nest, and now actually sync-checked.
+
+**Complications found:**
+1. **Pre-arrive needed a camspork grammar change.** sync_check issues pre-arrives from the allocating collective (the whole cluster),
+   so a per-thread increment would be wrong. `Arrive` gained a `flags` field (`arrive_pre_arrive_flag`: count := E, no PendingAwaits).
+   It's still traced as an Arrive event by the allocating threads, and the reference's `pre_arrive` does the same.
+2. **History log holds one barrier per sync statement** (`set_syncv_sync_stmt_info` is state for later log calls).
+   With no home, it logs the first target's counts. Error messages for multicast Arrives show only one barrier.
+3. **Goldens:** the 4 `test_3cycle_mbarrier` error-remark goldens change, only in logged counts (`0 -> 1` becomes `0 -> 32`, `<= 0` becomes `<= 31`, etc.).
+   Pytest's truncated diff showed only a source-path line, which is misleading; regenerate with `--update-golden` to see the real diff.
+4. **`test_ping_pong_reorder_arrive_raw`** (producer's `raw` Arrive moved before its TMA) expected the deleted trailing-barrier message.
+   It's still rejected, but later: the TMA's trailing PendingAwait gets the already-complete count (`raw[0, 0, 0, 0] arrive_count=64`),
+   which no Await covers, so the consumer's read of `B_smem` is a hazard (named `use_before_alloc`). The test now checks for that.
+   Open question: with `expect_tx` this order (arrive, then TMA) may be valid CUDA, as in CUTLASS; if so, this is the acknowledged expect-tx gap, rejecting conservatively.
+5. **`CudaClusterSync`** now reports "Too many arrives" instead of "Arrived twice on one-shot arrive barrier"; no test depended on the old text.
+6. Running sporkbench scripts or sync_check outside pytest/exocc needs `CAMSPORK_JIT_DIR` (environment only).
+
+**Not done:** a positive trace test for a multicast trailing barrier (TMA) after a peer's Arrive.
+That needs a TMA destination that sync_check accepts without a managed ring buffer; deferred to the ring buffer task.
+
+**Doc notes (step 8; spork_b is read-only, not caused by unrelated drift):** these no longer match the implementation:
+* `BarrierMulticast.tex`: the convergence requirement is gone.
+* `ArriveSemantics.tex`: only the home count was used; now each target's own count is.
+* `ArriveAwaitPairing.tex`: "batches" of B arrives incrementing each count by 1; now per-thread increments to an expected count.
+* `gHomeBarrier.tex`: the home barrier has no semantic role in sync-check, only as an encoding anchor, in distributed memory analysis, and in codegen.
+* `MbarrierUsage.tex`: "one-shot arrive" is replaced by "arrive count reaches the mbarrier.init count".
+
 ## Background: why literal counts must land before the convergence check goes
 
 * Today `on_arrive` (`syncv_table.cpp:1953-1976`) increments only the home barrier's count and tags every target's PendingAwait with it.
