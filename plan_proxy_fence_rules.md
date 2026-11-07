@@ -29,7 +29,7 @@ This is internally consistent; it is not claimed to be what NVIDIA intends (the 
   Used for the "data ready" Arrive after TMA loads with trailing barriers: the data travels via pending awaits, not witnessing.
 * New async-only sync-tl `{cuda_mbarrier_qual, cuda_async_proxy_retired_qual}` (name TBD; the human dislikes "async proxy"; `cuda_async_in_order` sounds wrong).
   Replaces `cuda_temporal` as L2 in WAR Awaits before TMA writes, and is the L1 of the consumer's "buffer free" Arrive.
-  Optionally also replaces `cuda_mbarrier_only` (the extra records it witnesses on the "data ready" Arrive are harmless); decide during implementation.
+  Also use it as the L1 of the "data ready" Arrive.
 * `cuda_in_order`, `Sm80_generic`, `cuda_generic_and_async_proxy`: drop their temporal-only members (`async`, `wg0`); their remaining members become the single set.
 * `generate_arrive` (mbarrier) must accept the async-only sync-tl as L1 (plain `mbarrier.arrive`).
 
@@ -57,7 +57,7 @@ This prevents unintended transitivity silently carrying a generic QualTL -> asyn
 
 | Pattern | Sync | Fence |
 |---|---|---|
-| TMA load → wgmma (RAW, multicast ok) | `Arrive(cuda_mbarrier_only)` / `Await(raw, cuda_generic_and_async_proxy)` | no |
+| TMA load → wgmma (RAW, multicast ok) | `Arrive(cuda_async_proxy_retired)` / `Await(raw, cuda_generic_and_async_proxy)` | no |
 | TMA load → `ld.shared` | same | no (implicit completion fence) |
 | wgmma read → TMA overwrite (WAR, multicast ok) | commit-group Await L2 ∋ async; `Arrive(async-only)` / `Await(war, async-only)` | no (matches CUTLASS) |
 | TMA write → TMA write same ring slot (WAW) | same path as WAR | no |
@@ -99,7 +99,7 @@ Memory/proxy fences should probably be modeled head-on (a fence "on the causalit
 
 ## Implementation notes (2026-09-29)
 
-* Names: async-only sync-tl is `cuda_async_proxy_retired = {mbar, async}` (human's name from `f0df2875`); `cuda_mbarrier_only = {mbar}` kept separate (used as the "data ready" Arrive L1).
+* Names: async-only sync-tl is `cuda_async_proxy_retired = {mbar, async}` (human's name from `f0df2875`); `cuda_mbarrier_only = {mbar}` kept separate.
 * `timelines.needs_proxy_fence(L1, L2)` implements the rule; used by garden-variety/cluster `Fence` and mbarrier `Await`. Commit groups assert it is false.
   `generate_arrive` accepts any L1 that is a subset of `cuda_generic_and_async_proxy` as plain `mbarrier.arrive`, checked before `Sm80_cp_async` (`cuda_mbarrier_only` is a subset of both).
   Fence L2 is now always validated (previously `L1 = cuda_temporal` skipped the L2 check).
