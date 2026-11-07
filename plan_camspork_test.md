@@ -110,7 +110,7 @@ Proposed `allocTrDetail` / `freeTrDetail`, matching `exec.cpp` `SyncEnvManageRin
    David Zhao Akeley: the spec is correct; camspork is wrong. Probably drop the auto-deduction of `QtlMask` (some other time).
    Fixing camspork alone (masking atomics) would make existing atomic-after-atomic sync checks fail until the masks include atomic qual-tls.
    The reference raises `NotImplementedError` for atomics until then; when implemented it follows the spec (masked).
-3. **`JoinThreads`** (above): a camspork-only sync event.
+3. **`JoinThreads`** (above): a camspork-only sync event. David Zhao Akeley: JoinThreads will not be in the spec; the reference keeps it as a documented DEVIATION.
 4. **Implicit syncs from `sync_check.py` lowering** show up in every trace: before the device function, `Fence(cpu ∪ cuda_stream, cuda_stream)` by the CPU;
    `JoinThreads` at the end of each device task; `JoinThreads` then `Fence(cuda_stream, cuda_stream)` by the CPU after the function.
    This is Exo lowering, not the spec. The reference keeps it in one helper (`ref_device_function` in the prototype test; move it into `camspork_ref.py`).
@@ -143,10 +143,54 @@ After that, `ProgramExec<true>` exists only for the history log.
 ## Risks / gaps found by prototyping
 
 * Accesses are not traced, only sync events. A wrong access followed by an overwrite with no sync in between is invisible.
-  Cheap fix: also trace before `DataFree` / `SyncEnvFreeShard` / `SyncEnvFreeManagedRingBuffer` (final state of the element).
+  David Zhao Akeley: accepted as a blind spot. The primary goal for now is to observe that the initial access threads are correct and that syncs grow vis records as expected,
+  so tests avoid the blind spot by construction: never create an access that is not followed by a sync.
 * Probe names are `str(Sym)`; same-named Syms (inlined procs) assert out. Could take `Sym`s directly.
 * Non-convergent accesses split into per-thread records in the reference. That's fine for test sizes (guarded at 2^20 threads).
 * The reference reuses Exo's qual-tl tables. A wrong table entry would show up identically on both sides (out of scope by design).
+
+## Decisions (David Zhao Akeley, 2026-11-07)
+
+* **Negative tests** ignore the trace entirely: they succeed as long as both camspork (syncv) and the reference fail, with no further inspection.
+  The reference does not need to predict which hazard, where.
+* **Initial scope** avoids mbarriers entirely (Arrive/Await are tested first through commit groups and cluster sync), managed ring buffers, atomics, and multi-dimensional tasks.
+  So the ring buffer `allocTrDetail` / `freeTrDetail`, `free_on_arrive`, multicast arrive counts, and the `QtlMask` atomics fix are not needed yet.
+* **camspork excut removal:** deferred.
+
+## Partial implementation (2026-11-07, exo `akeley98/camspork_trace_proto`)
+
+Scope per the decisions above. `tests/cuda/test_camspork_trace.py`: 10 tests, all passing.
+
+* **Passing (8):**
+  * named + numeric `CudaWarps`, positive and a negative trace mismatch;
+  * strided `cuda_threads(unit=2 * cuda_warp)`;
+  * `cp.async` (out-of-order, TAG 1) with `Sm80_CommitGroup` Arrive/Await;
+  * windows: big write then small reads, small writes then big read, partially overlapping;
+  * missing-Fence negative (both reject).
+* **Also passing:** `test_gmem_join_threads` and `test_cluster_sync`.
+  They were strict xfails for the Q_stream finding below until Q_stream was defined as `cuda_stream_sync`.
+
+Reference (`spork/camspork_ref.py`):
+* sync statements record their own trace entries;
+* `Barriers` holds all barrier counting and the one-shot checks; the mbarrier multicast rule is isolated in one unused method;
+* TAG grouping for non-convergent accesses; window accesses;
+* SMEM free check (`freeTrDetail` for non-ring SMEM);
+* `cuda_device_function` per amspork3 `C-CudaDeviceFunction` (Q_stream = `cuda_stream_sync`'s qual-tl), plus `device_task`;
+* prior mutates kept.
+
+Helpers: `qual_info`, `check_trace` (also flags vacuous probes), `check_both_fail`.
+
+Findings:
+* **Spec vs lowering (C-CudaDeviceFunction):**
+  * `sync_check.py` uses `cuda_stream_sync` bits for both implicit Fences.
+  * The spec's set was then Q_cuda, read as all qual-tl except `cpu_in_order_qual`. Compared with it, `cuda_stream_sync` lacks `wgmma_rmem_fenced_qual` and `tcgen05_smem_qual`.
+    `tcgen05_smem_qual` is in the SMEM/GMEM masks, so GMEM records alive at the device function's final Fence differed.
+    That reading also included the two atomic qual-tls, which camspork `REQUIRE`s never appear in a sync-tl.
+  * David Zhao Akeley: the set should be whatever `cuda_stream_sync` is, renamed Q_stream (`\sporkQtlStream` in amspork3). The reference uses that; `ControlSemantics.tex` still has "TODO define Q_stream".
+  * The spec's Fences are by all threads; camspork uses the "CPU" cuboid `[0, UINT32_MAX)`, which covers every linearized tid, so that part agrees.
+* **Barrier identity is per allocation**, matching the spec's alpha-renaming per loop iteration and camspork's distinct barrier ids. The first reference keyed barriers by name and wrongly synchronized one thread's Await with another thread's `cg`; the trace caught it.
+* **Scalar probes:** camspork scalar var slots always look allocated (no "unallocated" state). A scalar with no AssignmentRecord prints as `null` on both sides; a scalar barrier with id 0 is not live.
+* **Trace plumbing:** barrier names in pending awaits are recorded at `BarrierEnvAlloc`, since PendingAwaits outlive the barrier's var slot.
 
 ## Proposed order
 
@@ -173,6 +217,5 @@ After that, `ProgramExec<true>` exists only for the history log.
   * the lazy `task_index` behavior;
   * the excut removal footprint;
   * the doc notes above.
-* The reference's JoinThreads, Arrive and Await rules ran only on empty environments; no test has a record live during them yet.
-* Barrier `arrive_count` / `await_count` probes are written and compared on both sides, but no test probes a barrier yet.
+* (2026-11-07) JoinThreads, Arrive and Await now run with live records and barrier-count probes (commit group, cluster sync), and match camspork apart from the Q_stream finding (resolved).
 * `amspork3/Smem.tex` is empty; the `allocTrDetail` / `freeTrDetail` definitions above are candidates.
