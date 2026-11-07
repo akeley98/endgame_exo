@@ -77,3 +77,6 @@
   e.g. by accessing a tensor via a big window followed by a bunch of small windows (test de-convergence),
   test the opposite (test not incorrectly merging state),
   test access by partially overlapping windows.
+
+* Centralize handling of mbarriers in the Python reference since that may change imminently due to
+  [plan_multicast_barrier_counts.md](plan_multicast_barrier_counts.md).
