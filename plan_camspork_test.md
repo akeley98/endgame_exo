@@ -196,6 +196,22 @@ Findings:
 * **Scalar probes:** camspork scalar var slots always look allocated (no "unallocated" state). A scalar with no AssignmentRecord prints as `null` on both sides; a scalar barrier with id 0 is not live.
 * **Trace plumbing:** barrier names in pending awaits are recorded at `BarrierEnvAlloc`, since PendingAwaits outlive the barrier's var slot.
 
+## Finding: "a mutate discards prior reads" is unsound across tasks (2026-11-07)
+
+David Zhao Akeley's counterexample:
+* Each task does a generic read of `g[0, 0]`, then `Fence(cuda_in_order, cuda_generic_and_async_proxy)`, then a TMA reduce (atomic) into `g`.
+* There is no hazard within a task.
+* With 2 tasks, task 1's reduce races task 0's read (WAR). camspork misses it because task 0's own reduce discarded task 0's read record.
+
+Tests (`tests/cuda/test_camspork_trace.py`, `test_read_then_reduce_*`):
+* **1 task:** a full trace comparison. It passes, and it is the first test of atomics: TMA reduce with `Tid x Q_atom` masked, TAG 32. This needs exo `7c82d4a0` (QtlMask includes atomic qual-tls).
+* **2 tasks, every task reads:** both camspork and the reference reject. But the rejection comes from task 1's *read* (RAW vs task 0's reduce), which masks the WAR.
+* **2 tasks, only task 0 reads:** the unsound case. Strict xfail: camspork accepts.
+  The reference with spec semantics (`SyncEnvRef(discard_reads_on_mutate=False)`) rejects at `g[0, 0]`, thread 32 (task 1), during task 1's reduce.
+* Experiment, not committed: with camspork's read clearing disabled, the same case reports `WAR HAZARD`, and the 1-task case still passes.
+
+The reference keeps the rule by default (`discard_reads_on_mutate=True`) so the other traces match camspork.
+
 ## Proposed order
 
 1. Move `ref_device_function`, plus task/cluster helpers, into `camspork_ref.py`; add the free-trace hook. (srcinfo: done.)
