@@ -1,67 +1,173 @@
-# Research Record: Multicast mbarrier Counting (home barrier, Arrive N, convergence)
+# Plan: Literal mbarrier Arrive Counts (drop home barrier semantics and the multicast convergence check)
 
-Not yet an implementation plan. Collected 2026-10-09.
-Question: can multicast `Arrive` semantics drop the static convergence requirement (`spork_b/BarrierMulticast.tex`),
-e.g. by modeling each mbarrier's arrive count as the literal CUDA count and replacing "one-shot arrive" with "arrive count = expected arrive count"?
+**AI Disclosure: written by Claude Opus 5.5, distilled from an earlier research record (2026-10-09) and
+decisions by David Zhao Akeley (2026-11-07).** Line numbers are from exo `akeley98/endgame` at `18e5d3a2`.
 
-## Human Testing Request
+Depends on: [plan_camspork_test.md](plan_camspork_test.md) (trace testing, merged into `akeley98/endgame`).
 
-If [plan_sketch_camspork_test.md](camspork test) is implemented, write tests for the new mbarrier functionality.
+## Goals
 
-## (a) Where the home barrier expression is used
+1. **Literal counts.** An mbarrier element's arrive count is what the hardware counts: one per arriving *thread*, per target CTA.
+   It must reach the expected count `E` = the `mbarrier.init` count = `arrive_thread_count × len(cta_xor_list)` (`cuda_sync_state.py:323`).
+2. **No home barrier *semantics* in the abstract machine.** camspork's Arrive stops reading or updating any one barrier's state on behalf of the others
+   (`SyncvArrive::home_barrier` is deleted). The home index survives only as the anchor of the compact `ArriveIdx` encoding (below),
+   which just enumerates the targets. Elsewhere `home_barrier_expr()` keeps meaning "this CTA's own shard": distributed memory analysis and codegen.
+3. **Delete the static multicast convergence check** (`distributed_memory.py:588-613`).
+4. **Test** with camspork trace testing (`spork/camspork_ref.py`), observing the counts only *indirectly*,
+   through the pending awaits on records of plain (non-ring-buffer) data variables. Never probe the mbarrier itself;
+   the managed ring buffer modeling that would need is a later task.
 
-`LoopIR.SyncStmt.home_barrier_expr()` (`exo/src/exo/core/LoopIR.py:914`) merges the `>>` barrier exprs: same name, every dimension has at least one point, and all points agree.
+Also in scope (David Zhao Akeley): fix `test_arrive_incompatible_multicasts_positive`.
+Out of scope: `amspork3/Smem.tex` (leave it alone for now); managed ring buffers in the reference;
+removing the vestigial `SyncType.N` from Arrive (`Arrive(tl, 1)` syntax).
+It doesn't get in the way: the new increment comes from the barrier mechanism and the thread count, never from `N`,
+and camspork's Arrive already takes no `N`. Leave the existing `N == 1` checks and asserts alone.
 
-| Use | Location | Role |
+## Semantics
+
+### Counting unit, per barrier mechanism
+
+| Mechanism | Increment per Arrive | Expected count `E` |
 |---|---|---|
-| Abstract machine Arrive | `camspork/lib/syncv/syncv_table.cpp` `on_arrive` (~l.1951); `program/exec.cpp` `fill_tmp_offset_barriers` | **Semantic.** Only the home's `arrive_count` is read and incremented. Every referenced barrier gets a `PendingAwait` tagged with the *home's* old count. The one-shot check looks only at the home. |
-| sync_check lowering | `spork/sync_check.py:245-290` | Computes the home index to pass to `b.Arrive`. The barrier `SyncEnvAccess` is at the home with `access_multicasts`, so it still covers every referenced barrier. |
-| Distributed memory analysis | `spork/coll_analysis.py:268`, `spork/distributed_memory.py:575` (`consume_SyncStmt_idx`) | `DistributedIdxFsm` parses the home expr: distributed indices must be the executing CTA's iterators. **The convergence check lives here** (l.599-623). |
-| Codegen | `backend/compiler_fwd.py:43` (`cir_raw_non_distributed_home_barrier_idx`), `backend/LoopIR_compiler.py:1328-1377`, `spork/cuda_sync_state.py:517` | The home's non-distributed indices give the local mbarrier. Peers are reached with `mapa(cta_rank ^ xor)` over `cta_xor_list`. |
-| Validation | `spork/barrier_usage.py:71,122` | Name and shape checks only. |
-| Cursor API | `API_cursors.py:550` | |
+| `CudaMbarrier` (+ `PreArrive`) | number of threads in the executing collective, to **each** target barrier | `arrive_thread_count × len(cta_xor_list)` |
+| Commit groups (`Sm80_cp_async`, `tma_to_gmem_async`, wgmma) | 1 per collective (thread, warp, warpgroup) | none (lag-`N` semantics unchanged) |
+| `CudaClusterSync` | 1 per collective | 1 (replaces `one_shot_arrive`; `one_shot_await` stays) |
 
-Outside camspork's `on_arrive`, "home" only means **the executing CTA's own shard**, which is a syntactic and codegen notion.
-`on_arrive` is the one place where it has semantic weight, as the stand-in arrive count that `ArriveSemantics.tex` describes.
+This matches amspork3, which leaves the arrive count increment to the barrier mechanism's de-sugaring (`SyncTraceSemantics.tex`, note on `Tr-Arrive`).
+`BarrierMechanismTraits.one_shot_arrive` and camspork's `one_shot_arrive_flag` are deleted. They're replaced by
+a per-barrier `expected_arrive_count` (0 = unchecked) and an `arrive_per_thread` flag, both set at `BarrierEnvAlloc`.
 
-## (b) `SyncType.N` for Arrive types is vestigial
+### Arrive (`on_arrive`)
 
-* `pyparser.py:2008-2020`: accepts `Arrive(tl)` or `Arrive(tl, 1)` and raises `"Expect N=1 for Arrive"` otherwise.
-* `arrive_type(tl, N=1)` is the default, and `DoInsertArrive` (`LoopIR_scheduling.py:2915`) hardcodes `1`.
-* `BarrierUsage.visit_Arrive` enforces `N == 1` again. It records `min_N`/`max_N`, but nothing ever reads them, for Arrive or for Await.
-* `cuda_sync_state.py:525,621` asserts `N == 1` (mbarrier, commit group).
-* The camspork `b.Arrive(...)` takes no `N` at all. Only `Await` passes `N` (`sync_check.py:289`).
-* Fence decomposition stores Arrive `N=1` / Await `N=0` in `SyncInfo`.
-* Printing: `format_stmt` prints `Arrive(tl, 1)`, while `__str__` prints `arrive_type(tl)`.
-* Latent bug: `barrier_usage.py:94,144` do `info.stmts.append(info)` instead of `append(s)`. It is harmless today because only `stmts[0]` is read.
+For each distinct target barrier `b` (the union of all `>>` expressions, de-duplicated by camspork):
+record `PendingAwait(b, count_b)` with `b`'s **own** count before the increment, then `count_b += inc`.
+If `E` is set and `count_b > E`: error ("Too many arrives").
+There is no home: the history logger (`history_set_sync_stmt_info`) records before/after counts for every target.
 
-Options: delete the field for Arrive, or repurpose it as the PTX `mbarrier.arrive` count operand if a use appears. The only effect of deleting it is that `Arrive(tl, 1)` syntax goes away, and goldens and examples print it.
+### Await (`on_await`): "strict Await"
 
-## Motivation for literal counts
+If `E` is set, the Await requires `count == E` at that point in the trace, or it fails with "No forward progress".
+`max_arrive_count = count - 1 - N` is unchanged (`N == 0` for mbarriers).
 
-Primary: the abstract machine should model CUDA reality directly.
-An mbarrier's arrive count is the number of arrives it has physically received, and it must reach the `mbarrier.init` count.
-That is easy to explain. Today's spec instead updates only the home barrier's count as a stand-in for the whole group.
-Showing that the stand-in is even count-correct takes a cardinality argument (below), which is hard to follow.
+Today's check is `count != 0` on the awaited barrier, and the stand-in count only ever reflects the awaiting CTA's own arrive.
+So an Await can pass before its peer CTAs' arrives appear in the trace, and the convergence check is what hides that hole (counterexample below).
+Strict Await is the hardware rule: the phase completes only when all `E` arrives have landed.
 
-Secondary: today's model does not check forward progress for multicast barriers.
-Its Await check (`on_await`: home `arrive_count != 0`) only asks whether *the awaiting CTA's own* arrive has happened, not whether its peers' have.
-Today, the static convergence requirement is what hides this hole.
+It's conservative the same way as the non-multicast case. The trace runs `cuda_threads` iterations serially,
+so an Await that waits on a peer CTA's arrive *from the same iteration of the same loop nest* fails, even though it's valid CUDA.
+Such programs need the Await fissioned into a later loop nest, or waiting on an arrive from an earlier ring-buffer iteration.
 
-## What one-shot does and does not give you
+### Free (`free_barriers`)
 
-Count correctness holds under one-shot (CudaMbarrier, the only mechanism with `supports_arrive_multicast`):
+If `E` is set: `count == E`. This replaces "arrive count must be 1 (one-shot)".
 
-1. One-shot means every element's home count is exactly 1 at free (`syncv_table.cpp:1135`). So every Arrive `PendingAwait` has `arrive_count == 0`.
-   With `N == 0` forced, an Await at count 1 makes every pending await recorded so far eligible.
-2. Each element `z[a,b,k]` is the home of exactly one CTA, `(a,b)`, because of distributed memory analysis.
-   Multicast groups are symmetric, and `BarrierUsage` forces identical multicasts on all Arrives.
-3. So each element physically receives exactly `E = |group| = len(cta_xor_list)` arrives, which matches `mbarrier.init` (`arrive_thread_count × E`).
-   Edges are sound: every arrive that comes earlier in the trace lands in the phase the Await observes.
+### Pre-arrive
 
-Forward progress does **not** hold without the convergence check.
-The trace runs `cuda_threads` iterations serially (`exec.cpp` `ThreadsFor`), so an Await can pass while its peers' arrives come later in the trace.
-Counterexample (sync_check with the convergence check monkeypatched off: `distributed_memory.is_if_holding_with = lambda *a: True`):
+sync_check currently emits one `b.Arrive(0, bar[idx], ...)` per pre-arrived element (`sync_check.py:426-437`).
+Replace it with an operation that sets the count to `E` (requires count 0, creates no pending awaits).
+For example a `PreArrive` camspork statement, or a flag on the Arrive node.
+
+### Trailing barrier expressions
+
+Delete the check in the `!ForceArriveCount0` branch of `alloc_vis_record` (`syncv_table.cpp:788-797`),
+which demands that no Arrive came before the access ("one-shot arrive requirement").
+Each trailing barrier's PendingAwait gets that barrier's literal current count.
+
+**Acknowledged gap:** Exo doesn't check the ordering of the `expect_tx` Arrive against the TMA's `complete_tx`, or the byte accounting.
+That check was always unsound. amspork3 doesn't document it either.
+
+The `ForceArriveCount0 = true` path (managed ring buffer alloc records, `set_managed_ring_buffer_barriers`) is unchanged here and belongs to the ring buffer task.
+
+### Encoding: keep the compact `ArriveIdx` (anchor + per-expression multicast flags)
+
+Decision (David Zhao Akeley, 2026-11-07): **don't change the encoding in this plan.**
+`ArriveIdx` / `eval_multicast` is shared with `SyncEnvManageRingBuffer`, which is untested and not yet specified (see the next section).
+So sync_check still computes the anchor with `home_barrier_expr()` for `b.Arrive` and the barrier `SyncEnvAccess`, but it's only an encoding:
+`eval_multicast` turns (anchor, flags) into the target set, visiting each position once, so the target list has no duplicates.
+`fill_tmp_offset_barriers` stops returning the home barrier, and `on_arrive` sees only the target list.
+The Await may use `s.barriers[0]` instead of `home_barrier_expr()` (the same thing for a single point expression; optional).
+
+A per-expression encoding, where points may differ between expressions and no anchor exists, can come with the managed ring buffer task,
+once `SyncEnvManageRingBuffer` is specified and tested.
+
+### `SyncEnvManageRingBuffer`'s use of the encoding (what the code does today; not a spec)
+
+From `exec.cpp` `exec_impl(const SyncEnvManageRingBuffer*)` and `sync_check.py:439-505`, for each guard position `i` of buffer `x` (guard `g`, ring dimension `M`, depth `d`):
+
+* **Self-guarded** (a barrier ring, `g == x`): the multicast flags are `()`, so the anchor's own position is the only target.
+  alloc_on_await = `{g[i - d]}` (none if `i[M] < d`).
+* **Guarded data buffer:** the flags are the guard's Arrive multicasts (`DistributedAllocState.barrier_multicasts`, the same for all Arrives on `g` by `BarrierUsage`).
+  alloc_on_await = every guard position that **an Arrive anchored at `g[i]` would multicast to**, i.e. the anchor is `i` itself, not `i - d`.
+  This is a second, implicit home-style use: it treats `i` as the home of a hypothetical Arrive.
+* free_on_arrive = `g[i + d]` only, never multicast (none if self-guarded and out of range).
+* The alloc record uses `ForceArriveCount0`: `PendingAwait(b, 0)` for each alloc_on_await barrier `b`.
+
+Interaction with this plan: none intended. With literal counts and strict Await, `z = 0 ≤ E - 1`, so any Await that passes still covers the alloc record.
+Mismatch to resolve in the ring buffer task: `plan_camspork_test.md`'s draft `allocTrDetail` uses the single barrier `g[..i-d..]`,
+while the code uses `g[i]` plus its multicast peers for guarded data buffers.
+
+## Implementation steps
+
+1. **Python-side `E`.** Factor the expected count out of `cuda_sync_state.py:296-323`
+   (`arrive_thread_count × len(cta_xor_list(...))`) into one helper that both codegen and sync_check call.
+   Check that sync_check has what the helper needs (CollAnalysis thread iters, blockDim, the barrier usage's arrive `SyncInfo`); if it doesn't, thread it through.
+   Pass `E` and `arrive_per_thread` to `BarrierEnvAlloc`; delete the `one_shot_arrive` trait and flag.
+2. **camspork** (`syncv_table.{hpp,cpp}`, `exec.cpp`, `camspork.py`):
+   * `HamsterBarrierState` gains `expected_arrive_count` and the per-thread flag.
+   * `on_arrive`: per-target counts and the increment (thread count of the cuboid, or 1).
+   * `on_await`: strict check. `free_barriers`: `count == E`.
+   * Pre-arrive op.
+   * Remove the trailing-barrier one-shot check.
+   * `fill_tmp_offset_barriers` no longer returns the home; `SyncvArrive::home_barrier` is deleted. `ArriveIdx`, `eval_multicast` and `SyncEnvManageRingBuffer` are untouched.
+   * The history logger is called per target barrier.
+   * Keep `syncv_table.cpp` edits to these places.
+3. **sync_check** (`sync_check.py:251-300`): the Arrive lowering is unchanged apart from comments calling the home index the encoding anchor.
+   Optionally, the Await uses `s.barriers[0]`.
+4. **Reference** (`camspork_ref.py`, class `Barriers`): `alloc(name, expected=None, per_thread=False)`,
+   `arrive(targets, n_threads)` with per-target counts, plus the strict Await, free and pre-arrive checks.
+   Delete `arrive_multicast_mbarrier` and the one-shot arrive flag.
+5. **Audit before deleting the convergence check.** With steps 1-4 in, run every sync_check that uses multicast mbarriers:
+   `tests/cuda/test_sync_error_Sm90a_gemm.py`, the Sm90 sporkbench examples (compile + sync_check only on this machine), and `tests/cuda`.
+   The expectation is that the GEMMs pass, because their multicast Awaits (consumer "buffer free" barrier) wait on arrives from an earlier ring-buffer iteration.
+   **If any kernel fails "No forward progress" under strict Await, stop and report it** before changing the schedule or sporkbench.
+6. **Delete the convergence check** (`distributed_memory.py:588-613`, the `if any_multicast:` block).
+   No existing test covers it (grep for "convergence requirement" finds only the source).
+   The interval range check above it stays.
+7. **Tests** (below), then the full `tests/cuda` run per `exo/CLAUDE.md`.
+8. **Doc notes** (spork_b is read-only): record in this file that `BarrierMulticast.tex` (convergence requirement), `ArriveSemantics.tex` (home count),
+   `ArriveAwaitPairing.tex` ("batches"), `gHomeBarrier.tex` (semantic role) and `MbarrierUsage.tex` (one-shot arrive) no longer match.
+
+## Testing (`tests/cuda/test_camspork_trace.py`)
+
+Shared setup:
+* Sm90 cluster programs; sync_check runs on CPU.
+* Every mbarrier has extent == ring depth (`barrier[2, K @ ring_buffer_by(K)]`), so ring slots are never reused.
+* Probes are plain GMEM data variables only. The reference models mbarrier counts but not the barrier variable's own sync env.
+* Hand-compute `E` and the thread counts in each `mkref_*`, like the tids.
+
+How the counts show up: a data record written by CTA `c` and then witnessed by its Arrive gets `aw = {b: count_b before}` for every target `b`.
+An Await adds to the record (Ob grows) only if the strict check passes and `z ≤ E - 1`.
+
+### Positive (full trace comparison)
+
+* **2-CTA multicast, per-thread counts.** clusterDim=2, one warp per CTA arrives (T=32).
+  * Each CTA writes `g[c]`, then `Arrive(cuda_in_order) >> bar[c, 0] >> bar[:, 0]`.
+  * In a later loop nest, each CTA does `Await(bar[c, 0])` and reads `g[1 - c]`.
+  * Expected: `g[0].aw = {bar[0,0]: 0, bar[1,0]: 0}` and `g[1].aw = {bar[0,0]: 32, bar[1,0]: 32}`. Today's home rule gives `{0, 0}` for `g[1]`.
+  * Both Awaits pass with `E = 64`.
+* **Collective size variant:** the same with a 2-warp arrive collective (T=64, E=128), so `z` is visibly per-thread.
+* **4-CTA, 2-D multicast:** `Arrive >> bar[m, n, k] >> bar[m, :, k]` (group of 2 along `n`).
+  The counts grow only within row `m`; `bar[m', ...]` is untouched.
+* **`seq k` loop inside the CTA loop, Awaits in a later loop nest.** The convergence check used to reject this statically; it's valid CUDA.
+  Check `z` per `k`.
+* **Pre-arrive:** an Await on a pre-arrived element passes and augments nothing tied to that element.
+* **Trailing barrier after a peer's Arrive** (only if a non-ring-buffer SMEM TMA destination passes sync_check; otherwise defer to the ring buffer task):
+  the record's PendingAwait carries the literal count, and the Await covers it.
+* Commit-group and cluster-sync counting are already covered (`test_cp_async_commit_group`, `test_cluster_sync`); they must keep passing unchanged.
+
+### Negative (both camspork and the reference reject; the trace is ignored)
+
+* **Turnstile, `lag=2`** (deadlocks in CUDA) and **`lag=1`** (valid CUDA, but the serialized trace can't show it):
 
 ```python
 # clusterDim=2, blockDim=32, K=4
@@ -70,64 +176,36 @@ tb: barrier[2, (K + lag) @ ring_buffer_by(K + lag)] @ CudaMbarrier  # turnstile
 for cta in cuda_threads(0, 2, unit=cuda_cta_in_cluster):
     if cta == 1:
         for j in seq(0, lag):
-            Arrive(cuda_in_order, 1) >> tb[cta, j] >> tb[:, j]
+            Arrive(cuda_in_order) >> tb[cta, j] >> tb[:, j]
     for k in seq(0, K):
-        Arrive(cuda_in_order, 1) >> bar[cta, k] >> bar[:, k]
+        Arrive(cuda_in_order) >> bar[cta, k] >> bar[:, k]
         if cta == 0:
-            Arrive(cuda_in_order, 1) >> tb[cta, k] >> tb[:, k]
+            Arrive(cuda_in_order) >> tb[cta, k] >> tb[:, k]
         else:  # CTA 1 at iteration k waits for CTA 0 to reach iteration k + lag
-            Arrive(cuda_in_order, 1) >> tb[cta, k + lag] >> tb[:, k + lag]
+            Arrive(cuda_in_order) >> tb[cta, k + lag] >> tb[:, k + lag]
             Await(tb[cta, k + lag], cuda_in_order, 0)
         Await(bar[cta, k], cuda_in_order, 0)
     if cta == 0:
         for j in seq(K, K + lag):
-            Arrive(cuda_in_order, 1) >> tb[cta, j] >> tb[:, j]
+            Arrive(cuda_in_order) >> tb[cta, j] >> tb[:, j]
 ```
 
-Both `lag=1` and `lag=2` pass sync_check, but `lag=2` deadlocks in CUDA:
-* CTA 1, in iteration 0, waits for CTA 0's `tb` arrive from iteration 2.
-* CTA 0 is blocked at `Await(bar[0,1])` waiting for CTA 1's iteration-1 `bar` arrive.
+  Today both pass sync_check if the convergence check is disabled. Under literal counts, CTA 0's first `Await(bar[0, 0])` sees 32 of 64 arrives.
+* `if n_cta == 0:` around a multicast Arrive: a missing peer arrive fails the strict Await or the free check.
+* An Await in the same CTA body as its multicast Arrive (`Arrive >> bar[m,n,0] >> bar[m,:,0]; Await(bar[m,n,0])`): "No forward progress" (the documented conservatism).
+* Two Arrives on the same element: "Too many arrives".
+* A partial arrive never completed before free: the free check.
 
-The trace runs all of CTA 0 first. Each `Await(bar[0,k])` sees only CTA 0's own arrive on `bar[0,k]`, and CTA 1's turnstile Awaits find everything already arrived.
-Without a `seq` loop, a turnstile inside a single loop body can't deadlock, because CTA 1's Arrive precedes its turnstile wait. You need a lag of at least 2 iterations.
+### Existing tests
 
-Under literal counts with a strict Await (`count == E`), CTA 0's first `Await(bar[0,0])` sees 1 of 2 arrives and fails with "No forward progress".
-`lag=1` is rejected too: it's valid CUDA, but the serialized trace can't show it. That's the same conservatism as the non-multicast case.
+* `test_arrive_incompatible_multicasts_positive` (`tests/cuda/test_claude_barrier_usage_err.py:334`) is invalid CUDA:
+  its second Await reuses parity 0 (2 arrives, ring depth 1). Give each Arrive its own ring element, with Awaits that pass strict Await,
+  and actually run sync_check on it (`cuda_cpu_test` doesn't).
+* `test_sync_error_Sm90a_gemm.py` and the golden tests must pass unchanged (this plan changes no codegen or printing).
 
-Other experiments (clusterDim=4, `Arrive >> bar[m,n,k] >> bar[m,:,k]`, convergence check off):
+## Background: why literal counts must land before the convergence check goes
 
-| Program | Today | Convergence check off |
-|---|---|---|
-| `seq k` loop inside `n_cta` loop; Awaits in a later loop nest (valid CUDA) | rejected statically | PASS |
-| Same, with `if n_cta == 0:` around Arrive (invalid) | rejected statically | FAIL: "No forward progress" |
-| `test_arrive_incompatible_multicasts_positive` body (2 arrives, ring depth 1) | static checks pass (`cuda_cpu_test` never runs sync_check) | FAIL: "Arrived twice" |
-| `Arrive >> bar[m,n,0] >> bar[m,:,0]; Await(bar[m,n,0])` in the same CTA body (valid CUDA) | PASS (weak edges) | PASS |
-
-The third row is invalid in CUDA too (its second Await reuses parity 0), even though the test is labeled "positive".
-
-## Literal-count design sketch
-
-* `BarrierEnvAlloc` carries `E`, computed in Python from `SyncInfo.multicasts` and the extents. It must equal codegen's `len(cta_xor_list)`.
-  Count per Arrive instance (thread collective), or count per thread so that it literally equals the `mbarrier.init` count. Per-thread counting would allow relaxing `consistent_arrive_thread_count` later.
-* `on_arrive`: for each referenced barrier `b`, record `PendingAwait{b, count_b}` and then increment `count_b`. Error if `count_b > E`.
-  The home is kept for logs only.
-* `on_await`: "No forward progress" unless `count == E`. `max_arrive_count = count - 1 - N` is unchanged.
-* `free_barriers`: `count == E`, replacing "one-shot arrive".
-* Pre-arrive (`sync_check.py:426-430`, one arrive per element today): set the count to `E`.
-* Trailing barriers (`syncv_table.cpp:794`): the `count == 0` check must loosen to `count < E`.
-  Otherwise the multicast TMA trailing exprs (`raw[cta_m, :, k]`, `tk_gemm_util.py:1729`) fail in any schedule where a peer's Arrive precedes this CTA's TMA in the trace.
-  The current gemm is fissioned (all TMAs before all arrives), so it would still pass.
-  Real correctness comes from the `expect_tx`/`complete_tx` byte accounting, which Exo does not model.
-* `home_barrier_expr()` stays as the "own shard" expression for distributed memory analysis and codegen (rename?). It drops out of the semantics.
-* With strict Await, the last row of the table above becomes a "No forward progress" error. Programs like it need the Awaits fissioned into a later loop nest.
-  Check `tests/cuda/test_sync_error_Sm90a_gemm.py` (multicast, ncta_M=2, runs on CPU) and the sporkbench Sm90 examples for this.
-
-Not audited: ring-buffer slot reuse for barriers (the barrier `SyncEnvAccess` with `access_multicasts`). It is orthogonal to convergence.
-
-## Recommendation
-
-1. Implement literal counts with a strict Await in camspork and `sync_check.py`.
-   Then delete the convergence check (`distributed_memory.py:599-623`) and rewrite `BarrierMulticast.tex`, `ArriveSemantics.tex`, `ArriveAwaitPairing.tex`, `gHomeBarrier.tex` and `MbarrierUsage.tex` (one-shot → expected count).
-   Do **not** delete the convergence check before literal counts land (see counterexample).
-2. Tests: the turnstile program (`lag=1,2` rejected), the experiment table rows, and fixing `test_arrive_incompatible_multicasts_positive`.
-3. Remove `N` from Arrive (see (b)).
+* Today `on_arrive` (`syncv_table.cpp:1953-1976`) increments only the home barrier's count and tags every target's PendingAwait with it.
+* That is count-correct only under one-shot plus the distributed memory analysis (each element is the home of exactly one CTA).
+* Forward progress is **not** checked: `on_await` only asks whether the awaiting CTA's own arrive happened.
+* The static convergence check is what currently rules out programs like the turnstile `lag=2` example, which pass sync_check without it and deadlock in CUDA.
