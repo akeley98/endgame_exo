@@ -60,7 +60,8 @@ special window → `mem_analysis` error (wrong memory for the instr argument).
 * All analyses (`CheckBounds`, new_eff, `mem_analysis`, `CollAnalysis`, `sync_check`) see the desugared form.
 * `unify_derived_windows`: in `run_compile`, after `run_backend_checks`, before `Compiler` (hence before `loopir_lower_cuda`).
   Lexically scoped lookup (so `cut_loop`-style duplication with shared Syms works).
-* Printing: `x[1 + 2, 4:12] @ derived(w)`, reads parenthesized. Print-only; the parser does not accept it.
+* Printing (prototype only): `x[1 + 2, 4:12] @ derived(w)`, reads parenthesized. Print-only; the parser does not accept it.
+  Requirement (2026-11-02): the syntax must round-trip, and probably not use `@` (precedence footguns). Not settled.
   Object code still writes `w[i]` (frontend sugar).
 
 ## Code That Must Inspect `derived` (prototype list)
@@ -71,7 +72,9 @@ special window → `mem_analysis` error (wrong memory for the instr argument).
 * `DoReplace`: copy `derived` from the matched accesses to the new WindowExpr args (Sym unchanged);
   else search in-scope WindowStmts for a unique `SpecialWindow` matching the instr param memory (see Open Decisions).
 * Sym-changing rewrites clear `derived`: `stage_mem`, `unroll_buffer`. `reuse_buffer` keeps it (renames WindowStmt rhs too).
-* Node rebuild sites that must copy `derived`: `expand_dim` (Read/WindowExpr), `split_write`, `fold_into_reduce`, `prec_analysis`, `cuda_backend` (decayed-to-scalar).
+* Node rebuild sites that must copy `derived`: `expand_dim` (Read/WindowExpr), `split_write`, `fold_into_reduce`, `prec_analysis`.
+  (The prototype also copies `derived` in `cuda_backend`'s decayed-to-scalar Read, which is pointless:
+  `cuda_backend` runs inside `Compiler`, after unify, so it never sees `derived`.)
 * `mem_analysis.get_e_mem`: memory of a WindowExpr with `derived` is the derived window's (SpecialWindow).
 * `sync_check`: **all** WindowStmt handling deleted (want_value/want_sync/comp_qual_tl `src_buf` branches,
   `comp_index_expr` chaining, WindowStmt case). Only the SpecialWindow-as-proc-parameter fallback to `source_memory_type()` remains (dicey, separate issue).
@@ -112,12 +115,15 @@ Nearly all sugar traffic is `tk_gemm_util` (handwritten gemm object code + `sche
 2. **How a TMA argument gets `derived` when no matched access had it** (schedule flow: `stage_mem` builds fresh loads with `derived=None`;
    also any flow using `insert_window_stmt`). Options: keep `replace`'s special-window search (unique match or error), or an explicit `set_derived(call, arg, w)` op.
 3. **Frontend sugar** (object code `w[i]`): keep (it's the object-language feature; one small pass), or forbid indexing windows in object code
-   and add parseable `x[i] @ derived(w)` syntax (would touch ~60 source lines across exo/sporkbench).
+   and add parseable syntax for `derived` (would touch ~60 source lines across exo/sporkbench).
+   Either way the printed form must round-trip (see Pipeline); syntax TBD, likely not `@`.
 4. Window statement's own bounds (window vs its tensor) are unchecked today and in the prototype; matters for tensorMaps (box past the allocation).
 
 ## Remaining Cleanup (not attempted)
 
 Branches that only existed to resolve accesses through window names are now dead and could be deleted:
 `boundscheck.translate_eff`/window type_env, `new_eff.translate_win` / WindowStmt cases, `mem_analysis.window_alias`,
-`LoopIR` free-variable `T.Window.src_buf` handling, `extract_env` special-window case, `cuda_backend`/`coll_analysis` WindowStmt notes.
+`LoopIR` free-variable `T.Window.src_buf` handling, `extract_env` special-window case, possibly `coll_analysis` WindowStmt cases (check).
+**Not** `cuda_backend`: it runs after unify (inside `Compiler`, via `loopir_lower_cuda`), sees today's form with windows indexed directly,
+and must keep its WindowStmt handling, e.g. the census of window structs that go into the grid constant.
 Also: `insert_window_stmt` doesn't support windows of windows; unify equality is affine-only; printing syntax isn't parseable.
