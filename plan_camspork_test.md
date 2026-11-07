@@ -55,7 +55,23 @@ Straightforward. The prototype implements Post/Pre access (convergent and separa
 
 ### `SyncEnvImpl.tex` optimizations: what actually exists
 
-1. Mutate discards prior reads; non-atomic mutate discards prior mutates: `copy_on_write_update` in `checked_on_access_impl`. Implemented in the reference (OPT).
+1. Mutate discards prior reads: `copy_on_write_update` in `checked_on_access_impl`. Implemented in the reference (OPT).
+   The second half of the bullet (non-atomic mutate discards prior mutates) was **removed** from camspork in exo `03434218` (finding below).
+   The prototype reference on `akeley98/camspork_trace_proto` still implements it and must be updated after rebasing.
+   **Finding (2026-11-07): the mutate-clears-mutates rule is load-bearing, not just a performance optimization.**
+   * Experiment: exo `akeley98/experiment_keep_prior_mutates` (`1527e110`), env var `CAMSPORK_KEEP_PRIOR_MUTATES`.
+   * Selected sporkbench kernels (pldi Sm80 starter, Sm90a f32/bf16 GEMMs, tk_fa, unflash_attn; 56 sync_check calls) all still pass. Total time is 1.06x, worst case 2.1x on `unflash_attn_S_kernel`.
+   * But `tests/cuda/test_sync_error_Sm90a_gemm.py::test_ping_pong_positive` fails with `RAW HAZARD @ A_smem[0, ...]`, and `test_ping_pong_wrong_wgmma_cg` now reports RAW instead of `free_missing_arrive`.
+   * Cause: the managed ring buffer's alloc record (`set_managed_ring_buffer_barriers`; a mutate record with empty Ob and Aw on `war[i]`) is augmented by the producer's `Await(war, cuda_async_proxy_retired)`.
+     The TMA write used to delete it. Now it survives, and the consumer, ordered only through `raw`, never syncs with it.
+   * David Zhao Akeley: the alloc record must stay a mutate. It approximates "what happened to that memory before" (an older, aliased allocation of the recycled memory),
+     so later reads and writes must be checked against it (RAW/WAW), not just the first write. Making it a read record would miss those bugs.
+     The old rule was wrong reasoning that hid a real bug.
+   * Fix (David Zhao Akeley): the producer's "data ready" Arrive on `raw` uses `cuda_async_proxy_retired` instead of `cuda_mbarrier_only`.
+     The alloc record then syncs with that Arrive, picks up the `raw` pending await, and the consumer's `Await(raw)` covers it.
+     Applied to the 4 Arrives in `platforms/Sm90/tk_gemm_util.py`, together with removing the special case, on exo `akeley98/endgame`: fix `aaaf93c3`, special-case removal `03434218` (2026-11-07).
+     Codegen unchanged: only the printed `// Arrive(...)` comments in the Sm90a GEMM goldens and the remarks golden change. `tests/cuda` passes.
+   * The `cuda_mbarrier_only` / `cuda_async_proxy_retired` docstrings in `spork/timelines.py` were updated by David Zhao Akeley (in `aaaf93c3`).
 2. "Expand async observers to warp/warpgroup/CTA": this is the `gOooOpt` `thread_access_granularity`, applied **at access time** to non-convergent accesses with an out-of-order initial qual-tl,
    with TAG from `CollAnalysis.get_qual_tl_thread_alignment`. It is not applied at sync time as the bullet's wording suggests (doc imprecision; noted below).
    Reference plan: each test passes a literal TAG, per the sketch. Not in the prototype.
@@ -143,6 +159,7 @@ After that, `ProgramExec<true>` exists only for the history log.
 
 ## Doc notes (spork/docs, not caused by the rewrite)
 
+* `amspork3/SyncEnvImpl.tex` bullet 2 ("the same for prior mutates after tracing non-atomic mutates") no longer matches camspork after exo `03434218`.
 * `amspork3/SyncEnvImpl.tex` bullet 3 describes the TAG expansion as tied to the *synchronization's* scope; the implementation applies it at access time from per-qual-tl Fence/Arrive alignment, only for non-convergent out-of-order accesses.
 * `amspork3/SyncEnvImpl.tex` bullet 4 (JoinThreads expansion) describes an event absent from the trace grammar (`Traces.tex`).
 
