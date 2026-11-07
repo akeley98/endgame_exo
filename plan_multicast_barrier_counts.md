@@ -4,6 +4,10 @@ Not yet an implementation plan. Collected 2026-10-09.
 Question: can multicast `Arrive` semantics drop the static convergence requirement (`spork_b/BarrierMulticast.tex`),
 e.g. by modeling each mbarrier's arrive count as the literal CUDA count and replacing "one-shot arrive" with "arrive count = expected arrive count"?
 
+## Human Testing Request
+
+If [plan_sketch_camspork_test.md](camspork test) is implemented, write tests for the new mbarrier functionality.
+
 ## (a) Where the home barrier expression is used
 
 `LoopIR.SyncStmt.home_barrier_expr()` (`exo/src/exo/core/LoopIR.py:914`) merges the `>>` barrier exprs: same name, every dimension has at least one point, and all points agree.
