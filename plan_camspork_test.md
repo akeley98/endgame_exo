@@ -19,7 +19,7 @@ Both prototype tests pass (positive, plus a negative that catches a wrong `CudaW
 | `camspork/lib/syncv/syncv_table.{hpp,cpp}` | Debug Inspection section only (~45 lines): `debug_get_assignment_record_data`, `debug_get_barrier_data`, and `VisRecordDebugData::flags`. No core code touched. |
 | `camspork/lib/program/exec.{hpp,cpp}` | `ProgramEnv::{trace_filename, trace_probes}`, C API `camspork_set_trace_filename` / `camspork_add_trace_probe`. `ProgramExec::trace_sync` writes one JSON line before and after each Fence/Arrive/Await/JoinThreads. |
 | `camspork/camspork.py` | `ProgramEnv.set_trace(filename, [(var, idx)])` |
-| `spork/sync_check.py`, `API.py` | `p.sync_check(_camspork_trace=(filename, [("x", (0, 0))]), **sizes)`. Probes name variables by `str(Sym)` and assert it is unambiguous. Installed only on the first (unfiltered) run, not on the single-sync-var rerun. |
+| `spork/sync_check.py`, `API.py` | `p.sync_check(_camspork_trace=CamsporkTraceRequest(filename, [("x", (0, 0))]), **sizes)`; sync_check fills in `request.stmt_srcinfo`. Probes name variables by `str(Sym)` and assert it is unambiguous. Installed only on the first (unfiltered) run, not on the single-sync-var rerun. |
 | `spork/camspork_ref.py` | Python reference: `SyncEnvRef`, `Mbarriers` (all mbarrier logic), trace parse/compare/dump. |
 | `tests/cuda/test_camspork_trace.py` | `test_named_numeric_warps_{positive,negative}`: `CudaWarps(1, 3, name="B")` writes, CTA Fence, `CudaWarps(name="A")` writes, Fence. |
 
@@ -32,8 +32,14 @@ How it fits the sketch's constraints:
   The prototype adds the mutate list, barrier arrive/await counts, and the VisRecord `flags` (needed for "freed").
 * **Not allocated / out of range:** the probe prints `"mutate": null, "read": null` (and omits barrier counts). The reference uses `None` for a freed or not-yet-allocated variable.
   "Any live allocation of that name" works because camspork has one var slot per name.
-* **Formats:** camspork writes JSONL (`camspork_trace.jsonl`); the reference writes readable text (`reference_trace.txt`), both in the pytest `tmp_path`.
-  Each line has `stmt_id` (`StmtRef.raw_data`). BONUS (not wired yet): `compare_traces(..., srcinfo=)` takes a callback; build `StmtRef(raw)` and call `get_stmt_srcinfo`.
+* **Formats (excut-style round trip; David Zhao Akeley chose this, 2026-11-07):** both sides write the same JSONL schema to the pytest `tmp_path`, one line per sync event phase:
+  `camspork_trace.jsonl` (exec.cpp) and `reference_trace.jsonl` (`SyncEnvRef.write_trace`).
+  Both are read back by the same `parse_trace`, then compared. The same printer writes `camspork_trace.txt` and `reference_trace.txt`, which diff line by line (only the `@` source lines differ when traces match).
+  * Schema: `{phase, stmt, stmt_id, src, threads: [[lo, hi)...], cuboid, probes: [{var, idx, mutate, read, arrive_count?, await_count?}]}`.
+    Records are `{ob: [[lo, hi, qual_bits]...], aw: [["bar[i]", n]...], mask, flags}`.
+  * Source lines on both sides: camspork has `stmt_id`, which `parse_trace` maps to the Exo proc line via `get_stmt_srcinfo`; reference entries carry the `mkref` Python line (`get_srcinfo`, like `xrg(...)`; helpers pass `depth=`).
+    A mismatch message prints both, plus the JSONL file:line of each entry.
+  * Deliberately not copied from excut: variable deduction (e.g. for task IDs) and filtering unmentioned events. Camspork is predictable enough that these add risk without benefit (David Zhao Akeley).
 * **Comparison:** per probe and kind (mutate/read), compare **sets** of `VisRecord(ob, aw, mask, freed)`.
   Thread sets are interval tuples (the CPU is `[0, UINT32_MAX)`, so nothing can be enumerated).
   The sync statement's own thread cuboid is compared too, which checks how the *sync* statement was lowered, not just the accesses.
@@ -128,7 +134,7 @@ After that, `ProgramExec<true>` exists only for the history log.
 
 ## Proposed order
 
-1. Move `ref_device_function`, plus task/cluster helpers, into `camspork_ref.py`; add the free-trace hook; wire `srcinfo` (BONUS).
+1. Move `ref_device_function`, plus task/cluster helpers, into `camspork_ref.py`; add the free-trace hook. (srcinfo: done.)
 2. Managed ring buffers + mbarriers in the reference (`allocTrDetail` / `freeTrDetail` above, `FREED` mapping); port a reduced `test_3cycle_mbarrier` (name restriction + numeric range under warpgroup loop).
 3. Non-convergent out-of-order accesses with literal TAG (cp.async on Sm80), atomics after the `QtlMask` fix, strided collectives (`cuda_threads` with `unit=2 * cuda_warp`, as in `test_simple_named_warps`).
 4. Copy-on-write tests: big window then small windows (de-convergence), the reverse (no false merging), partially overlapping windows.
@@ -142,7 +148,7 @@ After that, `ProgramExec<true>` exists only for the history log.
 
 ## Unverified claims (Claude's reading only; worth a human check)
 
-* **[tested]** only: the trace plumbing; the CTA Fence expansion; thread mapping of `CudaWarps(1, 3, name="B")` and `CudaWarps(name="A")`; the implicit CPU Fence / JoinThreads events (their thread sets only, with no records live at those points).
+* **[tested]** only: the trace plumbing (both JSONL writers and the shared parser); the CTA Fence expansion; thread mapping of `CudaWarps(1, 3, name="B")` and `CudaWarps(name="A")`; the implicit CPU Fence / JoinThreads events (their thread sets only, with no records live at those points).
 * Not tested, from reading code:
   * the `allocTrDetail` / `freeTrDetail` definitions;
   * that the `freed(r)` predicate matches camspork's eager clearing (and the trailing-barrier edge case);
@@ -151,4 +157,5 @@ After that, `ProgramExec<true>` exists only for the history log.
   * the excut removal footprint;
   * the doc notes above.
 * The reference's JoinThreads, Arrive and Await rules ran only on empty environments; no test has a record live during them yet.
+* Barrier `arrive_count` / `await_count` probes are written and compared on both sides, but no test probes a barrier yet.
 * `amspork3/Smem.tex` is empty; the `allocTrDetail` / `freeTrDetail` definitions above are candidates.
