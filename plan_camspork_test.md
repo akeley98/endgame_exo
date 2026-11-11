@@ -156,7 +156,7 @@ After that, `ProgramExec<true>` exists only for the history log.
 * Accesses are not traced, only sync events. A wrong access followed by an overwrite with no sync in between is invisible.
   David Zhao Akeley: accepted as a blind spot. The primary goal for now is to observe that the initial access threads are correct and that syncs grow vis records as expected,
   so tests avoid the blind spot by construction: never create an access that is not followed by a sync.
-* Probe names are `str(Sym)`; same-named Syms (inlined procs) assert out. Could take `Sym`s directly.
+* Probe names are `str(Sym)`; a probed name shared by several Syms (e.g. after inlining or unrolling) asserts out (unprobed duplicates are fine since 2026-11-11). Could take `Sym`s directly.
 * Non-convergent accesses split into per-thread records in the reference. That's fine for test sizes (guarded at 2^20 threads).
 * The reference reuses Exo's qual-tl tables. A wrong table entry would show up identically on both sides (out of scope by design).
 
