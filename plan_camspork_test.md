@@ -127,8 +127,10 @@ Reference and tests: see "Managed ring buffers + mbarriers" below.
 ### Task IDs ("paper over")
 
 * camspork tid = `task_index × domain_num_threads + local tid`, and `task_index` is **lazy**: it increments only when a cuboid is used after a `TasksFor` iteration.
-* Prototype: the reference takes `threads_per_task` and a `task=` argument to `ref.tids`. That is exact for one task.
-* Multi-task tests: canonicalize task indices by first appearance on both sides, or keep tests at one task per device function.
+* So `task_index` is the lexicographic position of the task in the `cuda_tasks` loop nest:
+  the nest must be perfect (`loop_modes.py` `validate_loop`), and `sync_check.py` ends every device task with `JoinThreads`, which uses the cuboid, so each task bumps it exactly once.
+* Reference (2026-11-11): `SyncEnvRef(..., task_shape=...)`; `task=` arguments take an index tuple (or an int for a 1-D nest), linearized by `task_linear_index`.
+  Tested by `test_tasks_2d` (2 x 3 nest) and `test_tasks_2d_transposed_negative` (a column-major reference disagrees on thread sets).
 
 ### Fixed-width domain
 
