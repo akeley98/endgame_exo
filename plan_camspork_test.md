@@ -29,7 +29,7 @@ How it fits the sketch's constraints:
   `syncv_table` is still called with the `nullptr` logger (the `SyncvTrivialLogger` instantiation); the trace only reads state through the debug interface afterwards.
   Nothing uses `SinglePositionFilter`, so hash tables and assignment-record copy-on-write run as in production.
 * **Read-out needed almost nothing new.** `debug_get_vis_record_data` and `debug_get_read_vis_record_ids` already existed.
-  The prototype adds the mutate list, barrier arrive/await counts, and the VisRecord `flags` (needed for "freed").
+  The prototype adds the mutate list, barrier arrive/await counts, and the VisRecord `flags`.
 * **Not allocated / out of range:** the probe prints `"mutate": null, "read": null` (and omits barrier counts). The reference uses `None` for a freed or not-yet-allocated variable.
   "Any live allocation of that name" works because camspork has one var slot per name.
 * **Formats (excut-style round trip; David Zhao Akeley chose this, 2026-11-07):** both sides write the same JSONL schema to the pytest `tmp_path`, one line per sync event phase:
@@ -37,10 +37,12 @@ How it fits the sketch's constraints:
   Both are read back by the same `parse_trace`, then compared. The same printer writes `camspork_trace.txt` and `reference_trace.txt`, which diff line by line (only the `@` source lines differ when traces match).
   * Schema: `{phase, stmt, stmt_id, src, threads: [[lo, hi)...], cuboid, probes: [{var, idx, mutate, read, arrive_count?, await_count?}]}`.
     Records are `{ob: [[lo, hi, qual_bits]...], aw: [["bar[i]", n]...], mask, flags}`.
+    The only flag left is `vis_record_before_alloc_flag` (managed ring buffer alloc records), which the reference ignores.
   * Source lines on both sides: camspork has `stmt_id`, which `parse_trace` maps to the Exo proc line via `get_stmt_srcinfo`; reference entries carry the `mkref` Python line (`get_srcinfo`, like `xrg(...)`; helpers pass `depth=`).
     A mismatch message prints both, plus the JSONL file:line of each entry.
   * Deliberately not copied from excut: variable deduction (e.g. for task IDs) and filtering unmentioned events. Camspork is predictable enough that these add risk without benefit (David Zhao Akeley).
-* **Comparison:** per probe and kind (mutate/read), compare **sets** of `VisRecord(ob, aw, mask, freed)`.
+* **Comparison:** per probe and kind (mutate/read), compare **sets** of `VisRecord(ob, aw, mask)`.
+  (`camspork_ref.py`'s `VisRecord.freed` and its `flags & 2` decoding are dead and can be removed.)
   Thread sets are interval tuples (the CPU is `[0, UINT32_MAX)`, so nothing can be enumerated).
   The sync statement's own thread cuboid is compared too, which checks how the *sync* statement was lowered, not just the accesses.
 * **Thread IDs are hand-computed** in the reference (like excut `mkref_*`), so CollTiling → `ThreadsFor` lowering is checked independently.
@@ -51,7 +53,7 @@ How it fits the sketch's constraints:
 ### Reference sync env (`SyncEnvConcat.tex`)
 
 Straightforward. The prototype implements Post/Pre access (convergent and separate-tid), Fence, Arrive and Await as written, using `syncsWith` with the `Tid × QtlMask` mask.
-`Aw` is stored as `{barrier: min arrive count}`, which stands for the infinite set `{PendingAwait(b, z) | z ≥ n}`; camspork's `PendingAwait` means the same thing (see the comment in `syncv_table.hpp`).
+`Aw` is stored as `{barrier: min arrive count}`, which stands for the infinite set `{PendingAwait(b, z) | z ≥ n}`; camspork's `PendingAwaitRay` means the same thing (see the comment in `syncv_table.hpp`).
 
 ### `SyncEnvImpl.tex` optimizations: what actually exists
 
@@ -81,24 +83,24 @@ Straightforward. The prototype implements Post/Pre access (convergent and separa
    Rule: any record with an observer among the joining threads gets `joining threads × (union of those observers' qual-tls) ∩ mask`.
    The reference implements this as a DEVIATION (prototype: `SyncEnvRef.join_threads`).
 
-### `free_on_arrive` (research answer)
+### Managed ring buffer alloc / free
 
-The amspork3 grammar already has the hook: `TrPreAccess(..., Aw^free)`, and `syncsWith`'s `Aw` disjunct.
-Proposed `allocTrDetail` / `freeTrDetail`, matching `exec.cpp` `SyncEnvManageRingBuffer` / `SyncEnvFreeManagedRingBuffer` / `SyncEnvFreeShard`:
+Definitions: `amspork3/SmemAppendix.tex` (`allocTrDetail` / `freeTrDetail`).
+camspork implements both in `exec.cpp` `SyncEnvManageRingBuffer`, for element `x[..i..]` with guard multicast group `g_b` and depth `d`
+(exo `5f59ad7c`; it replaced camspork's `free_on_arrive` mechanism, whose eager clearing of records would have needed a reference deviation):
 
-* **Managed ring buffer, element `x[..i..]` with guard `g` and depth `d`:**
-  * `allocTrDetail` = `TrPostAccess(mutate, x, z, Tid=∅, q_init=-, Q_atom=∅, mask(x), Aw^post = {PendingAwait(g[..i-d..], z) | z ≥ 0})`.
-    It is omitted when `i < d` for a self-guarded ring. The `z ≥ 0` is camspork's `ForceArriveCount0`: any Await on `g[i-d]` satisfies it.
-  * `freeTrDetail` = `TrPreAccess(mutate, x, z, Tid=∅, Q=∅, Aw^free = {PendingAwait(g[..i+d..], z) | z ∈ ℕ})`.
-    This is vacuous when `i+d` is out of range. A record passes iff some Arrive including `g[i+d]` synced with it.
+* **Alloc** (`is_free=False`, `set_managed_ring_buffer_barriers`): a mutate record with empty Ob and,
+  for each guard, `PendingAwaitRay(g_b, z_eac - 1)`, where `g_b` is from `g[..i..]` for data, or `g[..i-d..]` for a self-guarded barrier ring (omitted when `i < d`).
+  It carries `vis_record_before_alloc_flag` until first augmented, so a failed check against it reports `use_before_alloc`.
+* **Free** (`is_free=True`, `on_check_pending_awaits`): every mutate and read record must contain `PendingAwait(g_b[..i+d..], z_eac - 1)` for **each** guard,
+  else `free_missing_arrive`. Vacuous when `i+d` is out of range for a self-guarded ring.
+
+This matches the spec directly, so the reference needs no deviation.
+Reference and tests: see "Managed ring buffers + mbarriers" below.
+
 * **Non-ring SMEM:** `allocTrDetail` = (). `freeTrDetail` = `TrPreAccess(mutate, x, z, {tid}, Q_pre(mem), ∅)` for every tid of the current box (non-convergent).
   sync_check refuses unless the box equals the cluster (over-approximation for SMEM reuse across the cluster).
   The mutate/read records are then dropped (alpha-renaming in amspork3; `clear_visibility` in camspork).
-* **The eager-clear deviation:** camspork's `ArriveUpdateCommand` empties a record (Ob and Aw) and sets `vis_record_freed_flag` as soon as an Arrive including `free_on_arrive` syncs with it.
-  Any later access to that element is a `use_after_free HAZARD`, even one the spec would accept.
-  Reference: keep spec semantics (the record keeps growing) and derive `freed(r) := r.aw ∋ g[i+d]`. Compare both sides with the record mapped to a `FREED` token (Ob/Aw ignored),
-  and add one explicit "use after freeing Arrive is an error" rule as a documented DEVIATION.
-  Edge case where the derived predicate and camspork differ: an access whose *trailing barrier* is `g[i+d]` (Aw at creation, never cleared by camspork). It is unlikely in real code; tests should avoid it or the reference can track "freed" as an event instead.
 
 ### Other deviations from amspork3 found (excluding task-ID linearization, one-shot, forward progress)
 
@@ -120,7 +122,7 @@ Proposed `allocTrDetail` / `freeTrDetail`, matching `exec.cpp` `SyncEnvManageRin
 4. **Implicit syncs from `sync_check.py` lowering** show up in every trace: before the device function, `Fence(cpu ∪ cuda_stream, cuda_stream)` by the CPU;
    `JoinThreads` at the end of each device task; `JoinThreads` then `Fence(cuda_stream, cuda_stream)` by the CPU after the function.
    This is Exo lowering, not the spec. The reference keeps it in one helper (`ref_device_function` in the prototype test; move it into `camspork_ref.py`).
-5. **Free check vocabulary:** `free_missing_sync` / `use_before_alloc` / `use_after_free` are hazard *names* only (flags on records); they don't change what is legal, except item "eager clear" above.
+5. **Free check vocabulary:** `free_missing_sync` (non-ring SMEM), `free_missing_arrive` (managed ring buffer) and `use_before_alloc` are hazard *names* only; they don't change what is legal.
 
 ### Task IDs ("paper over")
 
@@ -141,6 +143,7 @@ Footprint to delete:
 * `program/camspork_excut.{hpp,cpp}`
 * `SyncvLogRequest::p_excut_actions`
 * in `syncv_table.cpp`: `SyncvRealLogger::excut_*` (~150 lines), the `SyncvTrivialLogger` stubs, and 6 call sites in `checked_on_access_impl` / `set_managed_ring_buffer_barriers`
+* `ExcutVisRecordFreeOnArrive` (already dead: never constructed)
 * in `exec.cpp`: `ProgramExecLogBase` (file, `flush_excut_log`), and `log_barrier_helper`'s excut branch
 * the C API `p_excut_filename` arguments, and `ProgramEnv.exec(excut_filename=)` in `camspork.py`
 
@@ -160,8 +163,9 @@ After that, `ProgramExec<true>` exists only for the history log.
 * **Negative tests** ignore the trace entirely: they succeed as long as both camspork (syncv) and the reference fail, with no further inspection.
   The reference does not need to predict which hazard, where.
 * **Initial scope** avoids mbarriers entirely (Arrive/Await are tested first through commit groups and cluster sync), managed ring buffers, atomics, and multi-dimensional tasks.
-  So the ring buffer `allocTrDetail` / `freeTrDetail`, `free_on_arrive`, multicast arrive counts, and the `QtlMask` atomics fix are not needed yet.
+  So the ring buffer `allocTrDetail` / `freeTrDetail`, multicast arrive counts, and the `QtlMask` atomics fix are not needed yet.
 * **camspork excut removal:** deferred.
+* (2026-11-11) mbarriers and managed ring buffers are now in scope; see "Managed ring buffers + mbarriers" below.
 
 ## Partial implementation (2026-11-07, exo `akeley98/camspork_trace_proto`)
 
@@ -184,7 +188,7 @@ Reference (`spork/camspork_ref.py`):
 * `cuda_device_function` per amspork3 `C-CudaDeviceFunction` (Q_stream = `cuda_stream_sync`'s qual-tl), plus `device_task`;
 * prior mutates kept.
 
-Helpers: `qual_info`, `check_trace` (also flags vacuous probes), `check_both_fail`.
+Helpers: `qual_access_kw`, `check_trace` (also flags vacuous probes), `check_both_fail`.
 
 Findings:
 * **Spec vs lowering (C-CudaDeviceFunction):**
@@ -197,6 +201,38 @@ Findings:
 * **Barrier identity is per allocation**, matching the spec's alpha-renaming per loop iteration and camspork's distinct barrier ids. The first reference keyed barriers by name and wrongly synchronized one thread's Await with another thread's `cg`; the trace caught it.
 * **Scalar probes:** camspork scalar var slots always look allocated (no "unallocated" state). A scalar with no AssignmentRecord prints as `null` on both sides; a scalar barrier with id 0 is not live.
 * **Trace plumbing:** barrier names in pending awaits are recorded at `BarrierEnvAlloc`, since PendingAwaits outlive the barrier's var slot.
+
+## Managed ring buffers + mbarriers (2026-11-11, exo `akeley98/amspork3_SmemAppendix`)
+
+Reference (`spork/camspork_ref.py`), per `SmemAppendix.tex`:
+* `alloc_mbarrier`: a self-guarded mbarrier ring with its own sync env (QtlMask = `{cuda_mbarrier_qual}`).
+  `arrive` / `await_` first do the read access `sync_check.py` emits: `cuda_mbarrier_qual`, non-convergent on every multicast target (Arrive), convergent on the home barrier (Await).
+  This access is `sync_check.py` lowering; the spec only states the obligation ("Any Arrive or Await of x_b[z_b] must happen after awaiting for the previous phase").
+* `alloc(..., ring=RingGuard(guard, ring_dim, ring_depth, guard_multicast))`: SMEM data ring guarded by an mbarrier array.
+  `guard_multicast` is hand-written per test (like thread IDs) in the LoopIR `SyncStmt.multicasts()` format (one flag tuple per barrier expression),
+  and gives `guards()`: the union over expressions, as camspork's `eval_multicast` does (not a product over all multicast dimensions).
+* `free` / `free_barrier`: the ring free check (`freeTrDetail`) runs before the arrive count checks, as in `sync_check.py`.
+* `alloc_barrier` now rejects `per_thread` (mbarriers must use `alloc_mbarrier`); the existing mbarrier tests were switched over and still pass.
+* `VisRecord.freed` is removed; the reference ignores the trace's `flags`.
+
+Tests (`tests/cuda/test_camspork_trace.py`, "Managed ring buffers" section; 30 tests in the file pass):
+* `test_mbarrier_ring`: 4 phases on 2 physical mbarriers, probing every phase; Arrives by warps 0-1, Awaits by warp 0 and warp 1 separately.
+* `test_mbarrier_ring_free_negative`: only warp 0 arrives, so warp 1's Await record on phase k never gets phase k + 2's PendingAwait (`free_missing_arrive` on both sides).
+* `test_mbarrier_ring_missing_await_negative`: Arrive on phase 2 before any Await of phase 0 (camspork `use_before_alloc`; reference hazard).
+* `test_smem_ring`: producer/consumer `war` / `raw` ring as in the Sm90 GEMMs (`war` has K + D phases, first D pre-arrived), probing data and both barriers.
+* `test_smem_ring_early_war_arrive_negative`: the consumer releases the slot before reading it (`free_missing_arrive` on both sides; nothing else fails).
+* `test_smem_ring_multicast_2cta`: `war` and `raw` multicast across a 2-CTA cluster. The trace shows the alloc record's `Aw` on both guards (`gAwait` multicast expansion).
+* `test_smem_ring_cross_4cta`: the GEMMs' cross-shaped multicast (`>> war[m, n, k] >> war[m, :, k] >> war[:, n, k]`) on a 2 x 2 cluster; `Aw` on 3 guards, not 4.
+
+Checked by mutating the reference (each caught by at least one test): no `guards()` multicast expansion; product instead of union over expressions; `z_eac` instead of `z_eac - 1`; free check skipped; no mbarrier read access.
+
+Findings:
+* **Blind spot (David Zhao Akeley): `gNext`'s multicast expansion is untestable.** An Arrive always covers the whole multicast group, so either all of `gNext` is missing or none of it.
+  Fixable only with arbitrary distributed shared memory access, which is out of scope.
+* **Multicast WAR needs a multicast RAW.** A first version of the 2-CTA test had `raw` CTA-local. Both sides rejected it:
+  CTA 0's consumer arrived on CTA 1's next `war` phase with no ordering after CTA 1's producer awaited the current phase (a real race).
+  The GEMMs multicast `raw` too. Producers and consumers also need separate CTA loops, or the serialized trace has no forward progress (the documented conservatism).
+* **Hazard names differ** for the same rejection (e.g. camspork `use_before_alloc` vs the reference's generic hazard); negative tests don't compare them, per the decisions above.
 
 ## Finding: "a mutate discards prior reads" is unsound across tasks (2026-11-07)
 
@@ -230,7 +266,7 @@ Cost of dropping the rule (exo `akeley98/experiment_keep_prior_reads`, `e3425bdf
 ## Proposed order
 
 1. Move `ref_device_function`, plus task/cluster helpers, into `camspork_ref.py`; add the free-trace hook. (srcinfo: done.)
-2. Managed ring buffers + mbarriers in the reference (`allocTrDetail` / `freeTrDetail` above, `FREED` mapping); port a reduced `test_3cycle_mbarrier` (name restriction + numeric range under warpgroup loop).
+2. ~~Managed ring buffers + mbarriers in the reference~~ (done 2026-11-11). Still open: port a reduced `test_3cycle_mbarrier` (name restriction + numeric range under warpgroup loop).
 3. Non-convergent out-of-order accesses with literal TAG (cp.async on Sm80), atomics after the `QtlMask` fix, strided collectives (`cuda_threads` with `unit=2 * cuda_warp`, as in `test_simple_named_warps`).
 4. Copy-on-write tests: big window then small windows (de-convergence), the reverse (no false merging), partially overlapping windows.
 5. Delete camspork excut.
@@ -246,11 +282,9 @@ Cost of dropping the rule (exo `akeley98/experiment_keep_prior_reads`, `e3425bdf
 
 * **[tested]** only: the trace plumbing (both JSONL writers and the shared parser); the CTA Fence expansion; thread mapping of `CudaWarps(1, 3, name="B")` and `CudaWarps(name="A")`; the implicit CPU Fence / JoinThreads events (their thread sets only, with no records live at those points).
 * Not tested, from reading code:
-  * the `allocTrDetail` / `freeTrDetail` definitions;
-  * that the `freed(r)` predicate matches camspork's eager clearing (and the trailing-barrier edge case);
   * the multicast Arrive and JoinThreads descriptions;
   * the lazy `task_index` behavior;
   * the excut removal footprint;
   * the doc notes above.
 * (2026-11-07) JoinThreads, Arrive and Await now run with live records and barrier-count probes (commit group, cluster sync), and match camspork apart from the Q_stream finding (resolved).
-* `amspork3/Smem.tex` is empty; the `allocTrDetail` / `freeTrDetail` definitions above are candidates.
+* (2026-11-11) **[tested]** camspork's managed ring buffer alloc records (data and mbarrier) match `SmemAppendix.tex`; the free check agrees on pass/fail for the cases above (not `gNext` multicast).
