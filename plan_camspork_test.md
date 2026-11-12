@@ -19,7 +19,7 @@ Both prototype tests pass (positive, plus a negative that catches a wrong `CudaW
 | `camspork/lib/syncv/syncv_table.{hpp,cpp}` | Debug Inspection section only (~45 lines): `debug_get_assignment_record_data`, `debug_get_barrier_data`, and `VisRecordDebugData::flags`. No core code touched. |
 | `camspork/lib/program/exec.{hpp,cpp}` | `ProgramEnv::{trace_filename, trace_probes}`, C API `camspork_set_trace_filename` / `camspork_add_trace_probe`. `ProgramExec::trace_sync` writes one JSON line before and after each Fence/Arrive/Await/JoinThreads. |
 | `camspork/camspork.py` | `ProgramEnv.set_trace(filename, [(var, idx)])` |
-| `spork/sync_check.py`, `API.py` | `p.sync_check(_camspork_trace=CamsporkTraceRequest(filename, [("x", (0, 0))]), **sizes)`; sync_check fills in `request.stmt_srcinfo`. Probes name variables by `str(Sym)` and assert it is unambiguous. Installed only on the first (unfiltered) run, not on the single-sync-var rerun. |
+| `spork/sync_check.py`, `API.py` | `p.sync_check(_camspork_trace=CamsporkTraceRequest(filename, [x[0, 0]]), **sizes)` (probes are `StrElemName`s); sync_check fills in `request.stmt_srcinfo`. Probes name variables by `str(Sym)` and assert it is unambiguous. Installed only on the first (unfiltered) run, not on the single-sync-var rerun. |
 | `spork/camspork_ref.py` | Python reference: `SyncEnvRef`, `Mbarriers` (all mbarrier logic), trace parse/compare/dump. |
 | `tests/cuda/test_camspork_trace.py` | `test_named_numeric_warps_{positive,negative}`: `CudaWarps(1, 3, name="B")` writes, CTA Fence, `CudaWarps(name="A")` writes, Fence. |
 
@@ -41,7 +41,7 @@ How it fits the sketch's constraints:
   * Source lines on both sides: camspork has `stmt_id`, which `parse_trace` maps to the Exo proc line via `get_stmt_srcinfo`; reference entries carry the `mkref` Python line (`get_srcinfo`, like `xrg(...)`; helpers pass `depth=`).
     A mismatch message prints both, plus the JSONL file:line of each entry.
   * Deliberately not copied from excut: variable deduction (e.g. for task IDs) and filtering unmentioned events. Camspork is predictable enough that these add risk without benefit (David Zhao Akeley).
-* **Comparison:** per probe and kind (mutate/read), compare **sets** of `VisRecord(ob, aw, mask)`.
+* **Comparison:** per probe and kind (mutate/read), compare **sets** of `TraceVisRecord(ob, aw, mask)`.
   (`camspork_ref.py`'s `VisRecord.freed` and its `flags & 2` decoding are dead and can be removed.)
   Thread sets are interval tuples (the CPU is `[0, UINT32_MAX)`, so nothing can be enumerated).
   The sync statement's own thread cuboid is compared too, which checks how the *sync* statement was lowered, not just the accesses.
@@ -190,7 +190,7 @@ Reference (`spork/camspork_ref.py`):
 * `cuda_device_function` per amspork3 `C-CudaDeviceFunction` (Q_stream = `cuda_stream_sync`'s qual-tl), plus `device_task`;
 * prior mutates kept.
 
-Helpers: `qual_access_kw`, `check_trace` (also flags vacuous probes), `check_both_fail`.
+Helpers: `access_quals`, `check_trace` (also flags vacuous probes), `check_both_fail`.
 
 Findings:
 * **Spec vs lowering (C-CudaDeviceFunction):**
@@ -203,6 +203,14 @@ Findings:
 * **Barrier identity is per allocation**, matching the spec's alpha-renaming per loop iteration and camspork's distinct barrier ids. The first reference keyed barriers by name and wrongly synchronized one thread's Await with another thread's `cg`; the trace caught it.
 * **Scalar probes:** camspork scalar var slots always look allocated (no "unallocated" state). A scalar with no AssignmentRecord prints as `null` on both sides; a scalar barrier with id 0 is not live.
 * **Trace plumbing:** barrier names in pending awaits are recorded at `BarrierEnvAlloc`, since PendingAwaits outlive the barrier's var slot.
+
+## Typed reference (2026-11-11)
+
+`camspork_ref.py` no longer identifies anything by raw strings or dicts (excut style: slotted dataclasses, frozen where hashed; enums in code, strings only in JSON):
+* Names: `StrVarName` (x, `str(Sym)`), `ElemIdx` (z*), `StrElemName` (x[z*]; probes and traced barriers), `AllocVarName` (x#n, the n-th allocation of x, counted per x), `AllocElemName` (x#n[z*]; keys the reference's sync env and barrier state, projected to `StrElemName` in traces).
+* Enums: `AccessKind` (mutate/read), `SyncStmtKind`, `TracePhase`.
+* Records: `QualObservers`, `PendingAwaitRay` / `TracePendingAwaitRay`, `VisRecord` / `TraceVisRecord`, `ElemSyncEnv`, `AccessQuals`, `BarrierState`, `BarrierCounts`, `AllocRing`.
+* Traces: `TraceEntry` / `TraceProbe`; the module docstring documents the JSONL schema with types (`TraceEntryJson`, `TraceProbeJson`, `VisRecordJson`).
 
 ## Managed ring buffers + mbarriers (2026-11-11, exo `akeley98/amspork3_SmemAppendix`)
 
