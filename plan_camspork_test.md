@@ -19,7 +19,7 @@ Both prototype tests pass (positive, plus a negative that catches a wrong `CudaW
 | `camspork/lib/syncv/syncv_table.{hpp,cpp}` | Debug Inspection section only (~45 lines): `debug_get_assignment_record_data`, `debug_get_barrier_data`, and `VisRecordDebugData::flags`. No core code touched. |
 | `camspork/lib/program/exec.{hpp,cpp}` | `ProgramEnv::{trace_filename, trace_probes}`, C API `camspork_set_trace_filename` / `camspork_add_trace_probe`. `ProgramExec::trace_sync` writes one JSON line before and after each Fence/Arrive/Await/JoinThreads. |
 | `camspork/camspork.py` | `ProgramEnv.set_trace(filename, [(var, idx)])` |
-| `spork/sync_check.py`, `API.py` | `p.sync_check(_camspork_trace=CamsporkTraceRequest(filename, [x[0, 0]]), **sizes)` (probes are `StrElemName`s); sync_check fills in `request.stmt_srcinfo`. Probes name variables by `str(Sym)` and assert it is unambiguous. Installed only on the first (unfiltered) run, not on the single-sync-var rerun. |
+| `spork/sync_check.py`, `API.py` | `p.sync_check(_sync_check_trace=SyncCheckTraceRequest(filename, [("x", (0, 0))], var_cursors), **sizes)` (string-based; `SyncCheckTraceRequest` is defined in `sync_check.py` and distilled into `(filename, [(Sym, idx)])` for camspork); sync_check fills in `request.stmt_srcinfo`. Probes name variables by `str(Sym)` and assert it is unambiguous. Installed only on the first (unfiltered) run, not on the single-sync-var rerun. |
 | `spork/camspork_ref.py` | Python reference: `SyncEnvRef`, `Mbarriers` (all mbarrier logic), trace parse/compare/dump. |
 | `tests/cuda/test_camspork_trace.py` | `test_named_numeric_warps_{positive,negative}`: `CudaWarps(1, 3, name="B")` writes, CTA Fence, `CudaWarps(name="A")` writes, Fence. |
 
@@ -156,7 +156,8 @@ After that, `ProgramExec<true>` exists only for the history log.
 * Accesses are not traced, only sync events. A wrong access followed by an overwrite with no sync in between is invisible.
   David Zhao Akeley: accepted as a blind spot. The primary goal for now is to observe that the initial access threads are correct and that syncs grow vis records as expected,
   so tests avoid the blind spot by construction: never create an access that is not followed by a sync.
-* Probe names are `str(Sym)`; a probed name shared by several Syms (e.g. after inlining or unrolling) asserts out (unprobed duplicates are fine since 2026-11-11). Could take `Sym`s directly.
+* Probe names are `str(Sym)`; a probed name shared by several Syms (e.g. after inlining or unrolling) asserts out (unprobed duplicates are fine since 2026-11-11),
+  unless `check_trace(..., var_cursors={x: alloc_cursor})` maps the name to the intended variable's `AllocCursor` / `ArgCursor` (sync_check uses their internal `_sym()`; the cursor's variable must be named x) (`test_probe_cursor_*`).
 * Non-convergent accesses split into per-thread records in the reference. That's fine for test sizes (guarded at 2^20 threads).
 * The reference reuses Exo's qual-tl tables. A wrong table entry would show up identically on both sides (out of scope by design).
 
