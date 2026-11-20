@@ -33,7 +33,7 @@ Very important not to let anchoring bias override the following:
 * Atomics and GMEM synchronization environment are not modelled for this demo.
 
 * Managed ring buffers don't exist.
-  SMEM is indexed by CTA (optional) and ring buffer slot (latter in range `[0, ring_depth - 1]`.
+  SMEM is indexed by CTA (optional) and ring buffer slot (latter in range `[0, ring_depth - 1]`).
   Mbarriers are indexed by CTA (optional), ring buffer slot, then phase.
 
 * Ping me if there's deviations below from my own semantics not mentioned here.
@@ -66,6 +66,9 @@ Pseudocode program statements types:
 * (Not in Exo) `x_m, x_n = next_task()`, see Symbolic Evaluation.
   Think of `x_m, x_n` as control-type variables (index) even
   though this assignment is not possible at all in Exo.
+
+* Assignment to control value `x = e` where `e` can do typical Python-y arithmetic (`%`, `//`, etc.).
+  This assignment is not in Exo but is in the fictional amspork3 grammar.
 
 * (Not in Exo) `x = alloc_rmem[z^*]`, allocate RMEM (qtlConvergent = True).
 
@@ -105,15 +108,15 @@ t-th call to `next_task` (0-indexed) gives `(tasks[t].m + 0, tasks[t].n + 0)`.
 
 ## Symbolic Evaluation: non-GMEM Data Array Elements
 
-* `0`
+A. `0`
 
-* `A[tasks[z_t].m + z_off, z_k]`
+B. `A[tasks[z_t].m + z_off, z_k]`
 
-* `B[z_k, tasks[z_t].n + z_off]`
+C. `B[z_k, tasks[z_t].n + z_off]`
 
-* `A[tasks[z_t].m + z_off, z_k] * B[z_k, tasks[z_t].n + z_off]` (note shared value constraints)
+D. `A[tasks[z_t].m + z_off, z_k] * B[z_k, tasks[z_t].n + z_off]` (note shared value constraints)
 
-* `\sum_{k=0}^{z_k} A[tasks[z_t].m + z_off, k] * B[k, tasks[z_t].n + z_off]`
+E. `\sum_{k=0}^{z_k} A[tasks[z_t].m + z_off, k] * B[k, tasks[z_t].n + z_off]`
 
 Arithmetic giving not one of the above forms is an error at trace generation time.
 
@@ -123,6 +126,11 @@ For pedagogical purposes, include separately and prominently the
 thread(s) `(CTA rank, threadIdx)` that last assigned the value,
 with no qtl etc. as the thread assignment is of greatest TFC interest for now.
 
+Form A can implicitly convert to any form E with `z_k = -1`.
+Form D with `z_k = 0` can implicitly convert to form E
+with all named variables having the same values as in form D.
+Add whatever other conversions are needed to make fundamentally correct code work.
+
 
 ## Symbolic Evaluation: GMEM
 
@@ -131,7 +139,7 @@ No visibility records and sync check, as mentioned.
 `A` and `B` can only be read from;
 give symbolic `A[...]` `B[...]` values.
 `C[m, n]` can only be stored to;
-error if stored value is not `\sum_{k=0}^{K} A[m, k] * B[k, n]`.
+error if stored value is not `\sum_{k=0}^{K-1} A[m, k] * B[k, n]`.
 
 Earlier constraints imply `m, n` indices must have symbolic form
 `tasks[z_t].m + z_off` and `tasks[z_t].n + z_off` respectively.
@@ -143,23 +151,32 @@ Each barrier array element has an arrive count,
 and for mbarriers only,
 expected arrive count and visibility records.
 
+These are stored separately in syncv;
+the `barrier_id`-addressed state holds arrive count and expected arrive count,
+and you also need assignment records for mbarriers for the visibility records.
+
+If you're following the amspork3 semantics very carefully,
+you'll note that the arrive/await de-sugars to include
+an arrive count increase and, for mbarriers, a forward progress check.
+Both should be bundled into syncv's `on_arrive`/`on_await` already.
+
 
 ## Idealized Mbarrier Allocator
 
 For `x` of mbarrier arrays type only:
 
-* Error to access `x[z^*, z_phase]` until after the phase is prepared
-  with `prepare_phase(x[z^*, z_phase])`.
+* Error to access `x[z_loc^*, z_phase]` until after the phase is prepared
+  with `prepare_phase(x[z_loc^*, z_phase])`.
 
 * If `z_phase > 0`, this adds to the synchronization environment
-  `EnvEff(mutate, x, (z^* ++ z_phase)), EnvVis({}, Aw', Qtl_mask')`
-  where `Aw' = {PendingAwait(x, z^* ++ (z_phase-1), z) \mid z >= expected_arrive_count-1}`
+  `EnvEff(mutate, x, (z_loc^* ++ z_phase)), EnvVis({}, Aw', Qtl_mask')`
+  where `Aw' = {PendingAwait(x, z_loc^* ++ (z_phase-1), z) \mid z >= expected_arrive_count-1}`
   and `Qtl_mask' = {cuda_mbarrier_qual}`.
 
 * At program exit, `x` has a free check:
-  for every prepared `x[z^*, z_phase]` with `z_phase > 0`,
-  all visibility records (read or mutate) of `x[z^*, z_phase-1]`
-  must contain `PendingAwait(x, z^*, expected_arrive_count - 1)`.
+  for every prepared `x[z_loc^*, z_phase]` with `z_phase > 0`,
+  all visibility records (read or mutate) of `x[z_loc^*, z_phase-1]`
+  must contain `PendingAwait(x, z_loc^* ++ z_phase, expected_arrive_count - 1)`.
 
 This really should be similar to the SMEM Appendix except with the
 managed ring buffer dimension explicitly split to ring and phase dimensions,
@@ -197,10 +214,10 @@ omit CTA dimension if `clusterDim = 1`.
 For the mbarrier `prepare_phase`/free checks,
 `set_managed_ring_buffer_barriers` and `on_check_pending_awaits`
 seem to do exactly what's needed.
-(Double check) the former adds a single mutate `VisRecord` that contains
-`PendingAwait(x, z^*, expected_await_count - 1)` for each `x[z^*]` in the barrier array;
+The former adds a single mutate `VisRecord` that contains
+`PendingAwait(x, z^*, expected_arrive_count - 1)` for each `x[z^*]` in the barrier array;
 the latter checks each mutate/read `VisRecord` contain *all* of
-`PendingAwait(x, z^*, expected_await_count - 1)` for each `x[z^*]` in the barrier array.
+`PendingAwait(x, z^*, expected_arrive_count - 1)` for each `x[z^*]` in the barrier array.
 AFAIK this demo needs only length-1 arrays as we don't have data SMEM managed ring buffers.
 
 
@@ -222,6 +239,17 @@ that select the currently-viewed snapshot.
 Also, allow adjusting the (stmt id, iterator values)
 that selects the snapshot directly with "select stmt id" widgets next to statement numbers
 and adjust-iterator-value-up/down widgets next to loops.
+
+Agent asked
+
+> Viewer: say what a step’s snapshot shows. Say whether it’s the state
+> before or after the statement, and whether for/if/blk_thr count as
+> steps. The iterator up/down widgets can land on a step that never
+> ran, such as the if k == 0 body with k=3, so they need a rule for
+> that (snap to the nearest executed step, or grey it out).
+
+Show the state after the statement execution;
+for other issues, implement what makes the most sense/most convenient to you.
 
 Needs to be a status panel showing all variable and array values
 (except GMEM) of the currently-viewed snapshot, with each array in tabular format.

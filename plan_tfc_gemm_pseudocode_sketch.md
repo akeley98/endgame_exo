@@ -48,8 +48,8 @@ TMA (to SMEM or to GMEM, never reduce), wgmma, cp.async, or mma instructions
                 if phase > 0:
                     Await(cons_bar[ring, phase - 1], cuda_async_proxy_retired, 0)
                 # TMA to SMEM
-                (As[k_cu % RING] := A[m, k]) >> prod_bar[ring, phase]
-                (Bs[k_cu % RING] := B[k, n]) >> prod_bar[ring, phase]
+                (As[ring] := A[m, k]) >> prod_bar[ring, phase]
+                (Bs[ring] := B[k, n]) >> prod_bar[ring, phase]
                 Arrive(cuda_async_proxy_retired) >> prod_bar[ring, phase]
             with blk_thr[0:1, 128*ping + 128:128*ping + 256]:  # Consumer
                 Await(prod_bar[ring, phase], cuda_async_proxy_retired, 0)
@@ -76,12 +76,12 @@ TMA (to SMEM or to GMEM, never reduce), wgmma, cp.async, or mma instructions
 
             # Epilogue run by consumer warpgroup, uses ep_bar turnstile.
             if task > 0:
-                Await(ep_bar[1 - ping, (task - 1) // 2], cuda_in_order)
+                Await(ep_bar[1 - ping, (task - 1) // 2], cuda_in_order, 0)
             Cs[0] := Dr[ping]
-            Fence(cuda_in_order, cuda_async_proxy_retired)
+            Fence(cuda_in_order, cuda_async_proxy_retired)  # Warpgroup sync
             # TMA to GMEM
             with blk_thr[0:1, 128*ping + 128:128*ping + 160]:  # One warp of consumer
-                D[m, n] = Cs[0]
+                C[m, n] := Cs[0]
                 Arrive(tma_to_gmem_async) >> tma_gr[ping]
                 Await(tma_gr[ping], cuda_in_order, 0)
                 Arrive(cuda_in_order) >> ep_bar[ping, task // 2]
